@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import CoreLocation
 
 enum ExtractionError: Error {
     case unitParseError(String)
@@ -7,62 +8,179 @@ enum ExtractionError: Error {
 
 class HealthDataExporter {
     private var healthStore: HKHealthStore
-    
-    init(healthStore: HKHealthStore) {
+    private var server: String
+
+    init(healthStore: HKHealthStore, server : String) {
         self.healthStore = healthStore
+        self.server = server
     }
-    
-    func exportWorkouts(from startDate: Date, to endDate: Date, server: String, completion: @escaping (String) -> Void) {
+
+    func export(sampleType: HKSampleType, from startDate: Date, to endDate: Date, completion: @escaping (String?) -> Void) {
         print("Exporting data to \(server), from \(startDate) till \(endDate)")
         
         let predicate = HKQuery.predicateForSamples(withStart: startDate, end: endDate, options: .strictStartDate)
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
         
-        let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: [sortDescriptor]) { (query, samples, error) in
-            guard let workouts = samples as? [HKWorkout], error == nil else {
-                completion("Failed to fetch workouts: \(error?.localizedDescription ?? "Unknown error")")
+        let query = HKSampleQuery(sampleType: sampleType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { (query, samples, error) in
+            guard error == nil else {
+                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
                 return
             }
-            
-            let workoutsData = self.encodeWorkouts(workouts: workouts)
-            let encoder = JSONEncoder()
-            do {
-                let jsonData = try encoder.encode(workoutsData)
-                let session = URLSession(configuration: .default)
-                if let url = URL(string: server) {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.httpBody = jsonData
-                    
-                    let task = session.dataTask(with: request) { data, response, error in
-                        if let error = error {
-                            print("Client error: \(error.localizedDescription)")
-                            return
-                        }
-                        guard let httpResponse = response as? HTTPURLResponse,
-                              (200...299).contains(httpResponse.statusCode) else {
-                            print("Server error")
-                            return
-                        }
-                        if let data = data, let dataString = String(data: data, encoding: .utf8) {
-                            print("Server response: \(dataString)")
-                        }
-                    }
-                    task.resume()
-                }
-                completion("Success.")
-            } catch {
-                completion("Failed to serialize data: \(error)")
-                return;
+            if let samples = samples {
+                self.exportSamples(samples: samples, index: 0, completion: completion)
             }
         }
         
         healthStore.execute(query)
     }
+
+    private func sendPayload<T: Encodable>(data: T, path: String, completion: @escaping (String?) -> Void) {
+        var jsonData : Data? = nil
+        do {
+            jsonData = try JSONEncoder().encode(data)
+        } catch {
+            completion("Failed to serialize data: \(error)")
+            return
+        }
+        
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpShouldSetCookies = true
+        configuration.httpShouldUsePipelining = true
+        let session = URLSession(configuration: configuration)
+        if let url = URL(string: server + path) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = jsonData
+            
+            let task = session.dataTask(with: request) { data, response, error in
+                if let error = error {
+                    print("Client error: \(error.localizedDescription)")
+                    completion("Client error: \(error.localizedDescription)")
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode) else {
+                    print("Server error")
+                    completion("Server error")
+                    return
+                }
+//                if let data = data, let dataString = String(data: data, encoding: .utf8) {
+//                    print("Server response: \(dataString)")
+//                }
+                completion(nil)
+            }
+            task.resume()
+        }
+    }
+
+    private func exportHeartBeatSeries(heartbeatSeries: HKHeartbeatSeriesSample, completion: @escaping (String?) -> Void) {
+        var timeSinceSeriesStartArr : [Double] = []
+        var precededByGapArr : [Bool] = []
+        
+        let heartbeatSeriesQuery = HKHeartbeatSeriesQuery(heartbeatSeries: heartbeatSeries) {
+            (query, timeSinceSeriesStart, precededByGap, done, error) in
+            guard error == nil else {
+                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
+                return
+            }
+            
+            timeSinceSeriesStartArr.append(timeSinceSeriesStart)
+            precededByGapArr.append(precededByGap)
+            if (done != (timeSinceSeriesStartArr.count == heartbeatSeries.count)) {
+                fatalError("HR RR query issue: \(done) \(timeSinceSeriesStartArr.count)/\(heartbeatSeries.count)")
+            }
+
+            if (timeSinceSeriesStartArr.count == heartbeatSeries.count) {
+                let cSeriesSample = self.encodeHeartbeatSeriesSample(heartbeatSeriesSample: heartbeatSeries,
+                                                                     timeSinceSeriesStart: timeSinceSeriesStartArr,
+                                                                     precededByGap: precededByGapArr)
+                self.sendPayload(data: cSeriesSample, path: "heartbeat_series", completion: completion)
+            }
+            if (timeSinceSeriesStartArr.count > heartbeatSeries.count) {
+                fatalError("Too many samples in a HR series")
+            }
+        }
+        self.healthStore.execute(heartbeatSeriesQuery)
+    }
+    
+    private func exportWorkoutRoute(workoutRoute : HKWorkoutRoute, completion: @escaping (String?) -> Void) {
+        var cLocations : Array<CCLLocation> = []
+        
+        let workoutRouteQuery = HKWorkoutRouteQuery(route: workoutRoute) {
+            (query, locationsOrNil, done, error) in
+            guard error == nil else {
+                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
+                return
+            }
+            
+            guard let locations = locationsOrNil else {
+                fatalError("*** Invalid State: This can only fail if there was an error. ***")
+            }
+            
+            cLocations.append(contentsOf: locations.map(self.encodeCLLocation))
+            
+            if (done != (cLocations.count == workoutRoute.count)) {
+                fatalError("Workout route query issue: \(done) \(cLocations.count)/\(workoutRoute.count)")
+            }
+            if (cLocations.count == workoutRoute.count) {
+                let cLocationsArr = CCLLocations(locations: cLocations)
+                self.sendPayload(data: cLocationsArr, path: "workout_routes", completion: completion)
+            }
+            if (cLocations.count > workoutRoute.count) {
+                fatalError("Too many samples in workout route")
+            }
+        }
+        self.healthStore.execute(workoutRouteQuery)
+    }
+    
+    private func exportSample(sample: HKSample, completion: @escaping (String?) -> Void) {
+        if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
+            self.exportHeartBeatSeries(heartbeatSeries: heartbeatSeries, completion: completion)
+            return
+        }
+        
+        if let workoutRoute = sample as? HKWorkoutRoute {
+            self.exportWorkoutRoute(workoutRoute: workoutRoute, completion: completion)
+            return
+        }
+        
+        if let workout = sample as? HKWorkout {
+            self.sendPayload(data: self.encodeWorkout(workout: workout), path: "workouts", completion: completion)
+            return
+        }
+        if let quanititySample = sample as? HKQuantitySample {
+            self.sendPayload(data: self.encodeQuantitySample(quantitySample: quanititySample), path: "quantity_samples", completion: completion)
+            return
+        }
+        if let categorySample = sample as? HKCategorySample {
+            self.sendPayload(data: self.encodeCategorySample(categorySample: categorySample), path: "category_samples", completion: completion)
+            return
+        }
+
+        completion("Failed to cast the class: \(type(of: sample)).\n\(sample.description)")
+    }
+
+    private func exportSamples(samples: [HKSample], index: Int, completion: @escaping (String?) -> Void) {
+        if (index == samples.count) {
+            completion(nil)
+            return;
+        }
+        
+        let sample = samples[index]
+        exportSample(sample: sample) {
+            status in
+            if let status = status {
+                completion(status)
+                return
+            }
+            self.exportSamples(samples: samples, index: index + 1, completion: completion)
+        }
+    }
     
     struct CObjectType: Codable {
-        var identifier: String
+        let identifier: String
     }
     
     private func encodeObjectType(ot: HKObjectType) -> CObjectType {
@@ -72,13 +190,13 @@ class HealthDataExporter {
     }
     
     struct CSampleType : Codable {
-        var superObjectType : CObjectType
-        var isMinimumDurationRestricted: Bool
-        var minimumAllowedDuration: TimeInterval
-        var isMaximumDurationRestricted: Bool
-        var maximumAllowedDuration: TimeInterval
-        var allowsRecalibrationForEstimates: Bool
-
+        let superObjectType : CObjectType
+        let isMinimumDurationRestricted: Bool
+        let minimumAllowedDuration: TimeInterval
+        let isMaximumDurationRestricted: Bool
+        let maximumAllowedDuration: TimeInterval
+        let allowsRecalibrationForEstimates: Bool
+        
     }
     
     private func encodeSampleType(st: HKSampleType) -> CSampleType {
@@ -93,23 +211,23 @@ class HealthDataExporter {
     }
     
     struct CQuantityType : Codable {
-        var superSampleType : CSampleType
-        var aggregationStyle: Int
+        let superSampleType : CSampleType
+        let aggregationStyle: Int
     }
-
+    
     private func encodeQuantityType(quantityType: HKQuantityType) -> CQuantityType {
         return CQuantityType(superSampleType: encodeSampleType(st: quantityType), aggregationStyle: quantityType.aggregationStyle.rawValue)
     }
     
     struct CDevice: Codable {
-        var udiDeviceIdentifier: String?
-        var firmwareVersion: String?
-        var hardwareVersion: String?
-        var localIdentifier: String?
-        var manufacturer: String?
-        var model: String?
-        var name: String?
-        var softwareVersion: String?
+        let udiDeviceIdentifier: String?
+        let firmwareVersion: String?
+        let hardwareVersion: String?
+        let localIdentifier: String?
+        let manufacturer: String?
+        let model: String?
+        let name: String?
+        let softwareVersion: String?
     }
     
     private func encodeDevice(device: HKDevice) -> CDevice {
@@ -126,9 +244,9 @@ class HealthDataExporter {
     }
     
     struct COperationSystemVersion : Codable {
-        var majorVersion: Int
-        var minorVersion: Int
-        var patchVersion: Int
+        let majorVersion: Int
+        let minorVersion: Int
+        let patchVersion: Int
     }
     
     private func encodeOperationSystemVersion(osv: OperatingSystemVersion) -> COperationSystemVersion {
@@ -140,21 +258,21 @@ class HealthDataExporter {
     }
     
     struct CSource : Codable {
-        var bundleIdentifier: String
-        var name: String
+        let bundleIdentifier: String
+        let name: String
     }
     
     private func encodeSource(source: HKSource) -> CSource{
         return CSource(bundleIdentifier: source.bundleIdentifier, name: source.name)
     }
-
+    
     struct CSourceRevision : Codable {
-        var source: CSource
-        var version: String?
-        var operatingSystemVersion: COperationSystemVersion
-        var productType: String?
+        let source: CSource
+        let version: String?
+        let operatingSystemVersion: COperationSystemVersion
+        let productType: String?
     }
-
+    
     private func encodeSourceRevision(sr: HKSourceRevision) -> CSourceRevision {
         return CSourceRevision(
             source: encodeSource(source: sr.source),
@@ -165,10 +283,10 @@ class HealthDataExporter {
     }
     
     struct CObject: Codable {
-        var uuid: UUID
-        var metadata: [String : String]?
-        var device: CDevice?
-        var sourceRevision: CSourceRevision
+        let uuid: UUID
+        let metadata: [String : String]?
+        let device: CDevice?
+        let sourceRevision: CSourceRevision
     }
     
     private func encodeObject(object: HKObject) -> CObject {
@@ -180,11 +298,11 @@ class HealthDataExporter {
     }
     
     struct CSample : Codable {
-        var superObject : CObject
-        var startDate: Date
-        var endDate: Date
-        var hasUndeterminedDuration: Bool
-        var sampleType: CSampleType
+        let superObject : CObject
+        let startDate: Date
+        let endDate: Date
+        let hasUndeterminedDuration: Bool
+        let sampleType: CSampleType
     }
     
     private func encodeSample(sample: HKSample) -> CSample {
@@ -198,31 +316,12 @@ class HealthDataExporter {
     }
     
     struct CQuantity : Codable {
-        var unit: String
-        var doubleValue: Double
+        let unit: String
+        let doubleValue: Double
     }
     
     private func encodeQuantity(quantity: HKQuantity) -> CQuantity {
-        for unit in [
-            HKUnit.gram(),
-            HKUnit.meter(),
-            HKUnit.liter(),
-            HKUnit.pascal(),
-            HKUnit.second(),
-            HKUnit.joule(),
-            HKUnit.watt(),
-            HKUnit.degreeCelsius(),
-            HKUnit.decibelHearingLevel(),
-            HKUnit.hertz(),
-            HKUnit.diopter(),
-            HKUnit.degreeAngle(),
-            HKUnit.siemen(),
-            HKUnit.volt(),
-            HKUnit.internationalUnit(),
-            HKUnit.count(),
-            HKUnit.percent(),
-            HKUnit.meter().unitDivided(by: HKUnit.second())
-        ] {
+        for unit in HealthDataExporter.UNITS {
             if (quantity.is(compatibleWith: unit)) {
                 return CQuantity(unit: unit.unitString, doubleValue: quantity.doubleValue(for: unit))
             }
@@ -232,24 +331,24 @@ class HealthDataExporter {
     }
     
     struct CStatistics : Codable {
-        var startDate: Date
-        var endDate: Date
-        var quantityType: CQuantityType
-        var sources: [CSource]?
-        var sourceAverageQuantity: [String: CQuantity?]?
-        var averageQuantity: CQuantity?
-        var sourceMaximumQuantity: [String: CQuantity?]?
-        var maximumQuantity: CQuantity?
-        var sourceMinimumQuantity: [String: CQuantity?]?
-        var minimumQuantity: CQuantity?
-        var sourceSumQuantity: [String: CQuantity?]?
-        var sumQuantity: CQuantity?
-        var sourceDuration: [String: CQuantity?]?
-        var duration: CQuantity?
-        var sourceMostRecentQuantity: [String: CQuantity?]?
-        var mostRecentQuantity: CQuantity?
-        var sourceMostRecentQuantityDateInterval: [String: DateInterval?]?
-        var mostRecentQuantityDateInterval: DateInterval?
+        let startDate: Date
+        let endDate: Date
+        let quantityType: CQuantityType
+        let sources: [CSource]?
+        let sourceAverageQuantity: [String: CQuantity?]?
+        let averageQuantity: CQuantity?
+        let sourceMaximumQuantity: [String: CQuantity?]?
+        let maximumQuantity: CQuantity?
+        let sourceMinimumQuantity: [String: CQuantity?]?
+        let minimumQuantity: CQuantity?
+        let sourceSumQuantity: [String: CQuantity?]?
+        let sumQuantity: CQuantity?
+        let sourceDuration: [String: CQuantity?]?
+        let duration: CQuantity?
+        let sourceMostRecentQuantity: [String: CQuantity?]?
+        let mostRecentQuantity: CQuantity?
+        let sourceMostRecentQuantityDateInterval: [String: DateInterval?]?
+        let mostRecentQuantityDateInterval: DateInterval?
     }
     
     private func encodeStatistic(statistic: HKStatistics) -> CStatistics {
@@ -259,7 +358,7 @@ class HealthDataExporter {
             dict, tuple in
             dict[tuple.key] = tuple.value
         }
-
+        
         return CStatistics(
             startDate: statistic.startDate,
             endDate: statistic.endDate,
@@ -283,16 +382,16 @@ class HealthDataExporter {
     }
     
     struct CWorkoutAllStatisticEntry : Codable {
-        var quantityType : CQuantityType
-        var statistic : CStatistics
+        let quantityType : CQuantityType
+        let statistic : CStatistics
     }
     
     struct CWorkoutConfiguration : Codable {
-        var activityType: UInt
-        var locationType: Int
-        var swimmingLocationType: Int
-        var lapLength: CQuantity?
-
+        let activityType: UInt
+        let locationType: Int
+        let swimmingLocationType: Int
+        let lapLength: CQuantity?
+        
     }
     
     private func encodeWorkoutConfiguration(configuration : HKWorkoutConfiguration) -> CWorkoutConfiguration {
@@ -304,9 +403,9 @@ class HealthDataExporter {
     }
     
     struct CWorkoutEvent : Codable {
-        var dateInterval: DateInterval
-        var type: Int
-        var metadata: [String : String]?
+        let dateInterval: DateInterval
+        let type: Int
+        let metadata: [String : String]?
     }
     
     private func encodeWorkoutEvent(event: HKWorkoutEvent) -> CWorkoutEvent {
@@ -316,16 +415,16 @@ class HealthDataExporter {
             metadata: event.metadata?.mapValues({"\($0)"})
         )
     }
-
+    
     struct CWorkoutActivity : Codable {
-        var uuid: UUID
-        var startDate: Date
-        var endDate: Date?
-        var duration: TimeInterval
-        var allStatistics: [CWorkoutAllStatisticEntry]
-        var metadata: [String : String]?
-        var workoutConfiguration: CWorkoutConfiguration
-        var workoutEvents: [CWorkoutEvent]
+        let uuid: UUID
+        let startDate: Date
+        let endDate: Date?
+        let duration: TimeInterval
+        let allStatistics: [CWorkoutAllStatisticEntry]
+        let metadata: [String : String]?
+        let workoutConfiguration: CWorkoutConfiguration
+        let workoutEvents: [CWorkoutEvent]
     }
     
     private func encodeWorkoutActivity(activity: HKWorkoutActivity) -> CWorkoutActivity {
@@ -342,14 +441,14 @@ class HealthDataExporter {
             workoutConfiguration: encodeWorkoutConfiguration(configuration: activity.workoutConfiguration),
             workoutEvents: activity.workoutEvents.map{encodeWorkoutEvent(event: $0)})
     }
-        
+    
     struct CWorkout : Codable {
-        var superSample : CSample
-        var duration: TimeInterval
-        var workoutActivityType: UInt
-        var workoutActivities: [CWorkoutActivity]
-        var workoutEvents: [CWorkoutEvent]?
-        var allStatistics: [CWorkoutAllStatisticEntry]
+        let superSample : CSample
+        let duration: TimeInterval
+        let workoutActivityType: UInt
+        let workoutActivities: [CWorkoutActivity]
+        let workoutEvents: [CWorkoutEvent]?
+        let allStatistics: [CWorkoutAllStatisticEntry]
     }
     
     private func encodeWorkout(workout: HKWorkout) -> CWorkout {
@@ -366,11 +465,238 @@ class HealthDataExporter {
         )
     }
     
-    struct CWorkouts : Codable {
-        var workouts : [CWorkout]
+    struct CQuantitySample : Codable {
+        let superSample: CSample
+        let quantity: CQuantity
+        let count: Int
+        let quantityType: CQuantityType
     }
     
-    private func encodeWorkouts(workouts: [HKWorkout]) -> CWorkouts {
-        return CWorkouts(workouts: workouts.map{encodeWorkout(workout: $0)})
+    private func encodeQuantitySample(quantitySample: HKQuantitySample) -> CQuantitySample {
+        return CQuantitySample(superSample: encodeSample(sample: quantitySample),
+                               quantity: encodeQuantity(quantity: quantitySample.quantity),
+                               count: quantitySample.count,
+                               quantityType: encodeQuantityType(quantityType: quantitySample.quantityType))
     }
+    
+    struct CSeriesSample : Codable {
+        let superSample : CSample
+        let count: Int
+    }
+    
+    private func encodeSeriesSample(seriesSample: HKSeriesSample) -> CSeriesSample {
+        return CSeriesSample(superSample: encodeSample(sample: seriesSample), count: seriesSample.count)
+    }
+    
+    struct CHeartbeatSeriesSample : Codable {
+        let seriesSample : CSeriesSample
+        let timeSinceSeriesStart : [Double]
+        let precededByGap : [Bool]
+    }
+    
+    private func encodeHeartbeatSeriesSample(
+        heartbeatSeriesSample: HKHeartbeatSeriesSample,
+        timeSinceSeriesStart : [Double],
+        precededByGap : [Bool]
+    ) -> CHeartbeatSeriesSample {
+        return CHeartbeatSeriesSample(seriesSample: encodeSeriesSample(seriesSample: heartbeatSeriesSample),
+                                      timeSinceSeriesStart: timeSinceSeriesStart,
+                                      precededByGap: precededByGap)
+    }
+    
+    struct CCLLocationSourceInformation : Codable {
+        let isProducedByAccessory: Bool
+        let isSimulatedBySoftware: Bool
+    }
+    
+    struct CCLLocation: Codable {
+        let latitude: Double
+        let longitude: Double
+        let altitude: Double
+        let ellipsoidalAltitude: Double
+        let floor: Int?
+        let timestamp: Date
+        let sourceInformation: CCLLocationSourceInformation?
+        let horizontalAccuracy: Double
+        let verticalAccuracy: Double
+        let speed: Double
+        let speedAccuracy: Double
+        let course: Double
+        let courseAccuracy: Double
+    }
+    
+    struct CCLLocations: Codable {
+        let locations : Array<CCLLocation>
+    }
+
+    private func encodeCLLocation(location : CLLocation) -> CCLLocation {
+        return CCLLocation(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            altitude: location.altitude,
+            ellipsoidalAltitude: location.ellipsoidalAltitude,
+            floor: location.floor?.level,
+            timestamp: location.timestamp,
+            sourceInformation: location.sourceInformation == nil ? nil : CCLLocationSourceInformation(
+                isProducedByAccessory: location.sourceInformation!.isProducedByAccessory,
+                isSimulatedBySoftware: location.sourceInformation!.isSimulatedBySoftware),
+            horizontalAccuracy: location.horizontalAccuracy,
+            verticalAccuracy: location.verticalAccuracy,
+            speed: location.speed,
+            speedAccuracy: location.speedAccuracy,
+            course: location.course,
+            courseAccuracy: location.courseAccuracy)
+    }
+    
+    
+    struct CCategorySample : Codable {
+        let superSample : CSample
+        let categoryType: CSampleType
+        let value: Int
+    }
+    
+    private func encodeCategorySample(categorySample: HKCategorySample) -> CCategorySample {
+        return CCategorySample(
+            superSample: encodeSample(sample: categorySample),
+            categoryType: encodeSampleType(st: categorySample.categoryType),
+            value: categorySample.value)
+    }
+    
+    static let UNITS = [
+        HKUnit.gram(),
+        HKUnit.meter(),
+        HKUnit.liter(),
+        HKUnit.second(),
+        HKUnit.largeCalorie(),
+        HKUnit.watt(),
+        HKUnit.degreeFahrenheit(),
+        HKUnit.decibelHearingLevel(),
+        HKUnit.init(from: "count/s"),
+        HKUnit.diopter(),
+        HKUnit.degreeAngle(),
+        HKUnit.count(),
+        HKUnit.percent(),
+        HKUnit.meter().unitDivided(by: HKUnit.second()),
+        HKUnit.decibelAWeightedSoundPressureLevel(),
+        HKUnit.init(from: "mL/min·kg"),
+        HKUnit.init(from: "kcal/hr·kg"),
+        //            HKUnit.siemen(),
+        //            HKUnit.volt(),
+        //            HKUnit.internationalUnit(),
+        //            HKUnit.pascal(),
+    ]
+    
+    static let QUANTITY_TYPES: [HKQuantityTypeIdentifier] = [
+        .stepCount,
+        .distanceWalkingRunning,
+        .runningGroundContactTime,
+        .runningPower,
+        .runningSpeed,
+        .runningStrideLength,
+        .runningVerticalOscillation,
+        .distanceCycling,
+        .pushCount,
+        .distanceWheelchair,
+        .swimmingStrokeCount,
+        .distanceSwimming,
+        .distanceDownhillSnowSports,
+        .basalEnergyBurned,
+        .activeEnergyBurned,
+        .flightsClimbed,
+        .nikeFuel,
+        .appleExerciseTime,
+        .appleMoveTime,
+        .appleStandTime,
+        .vo2Max,
+        .height,
+        .bodyMass,
+        .bodyMassIndex,
+        .leanBodyMass,
+        .bodyFatPercentage,
+        .waistCircumference,
+        .appleSleepingWristTemperature,
+        .basalBodyTemperature,
+        .environmentalAudioExposure,
+        .headphoneAudioExposure,
+        .heartRate,
+        .restingHeartRate,
+        .walkingHeartRateAverage,
+        .heartRateVariabilitySDNN,
+        .heartRateRecoveryOneMinute,
+        .atrialFibrillationBurden,
+        .oxygenSaturation,
+        .bodyTemperature,
+        .bloodPressureDiastolic,
+        .bloodPressureSystolic,
+        .respiratoryRate,
+        .bloodGlucose,
+        .electrodermalActivity,
+        .forcedExpiratoryVolume1,
+        .forcedVitalCapacity,
+        .inhalerUsage,
+        .insulinDelivery,
+        .numberOfTimesFallen,
+        .peakExpiratoryFlowRate,
+        .peripheralPerfusionIndex,
+        .appleSleepingWristTemperature,
+        .dietaryBiotin,
+        .dietaryCaffeine,
+        .dietaryCalcium,
+        .dietaryCarbohydrates,
+        .dietaryChloride,
+        .dietaryCholesterol,
+        .dietaryChromium,
+        .dietaryCopper,
+        .dietaryEnergyConsumed,
+        .dietaryFatMonounsaturated,
+        .dietaryFatPolyunsaturated,
+        .dietaryFatSaturated,
+        .dietaryFatTotal,
+        .dietaryFiber,
+        .dietaryFolate,
+        .dietaryIodine,
+        .dietaryIron,
+        .dietaryMagnesium,
+        .dietaryManganese,
+        .dietaryMolybdenum,
+        .dietaryNiacin,
+        .dietaryPantothenicAcid,
+        .dietaryPhosphorus,
+        .dietaryPotassium,
+        .dietaryProtein,
+        .dietaryRiboflavin,
+        .dietarySelenium,
+        .dietarySodium,
+        .dietarySugar,
+        .dietaryThiamin,
+        .dietaryVitaminA,
+        .dietaryVitaminB12,
+        .dietaryVitaminB6,
+        .dietaryVitaminC,
+        .dietaryVitaminD,
+        .dietaryVitaminE,
+        .dietaryVitaminK,
+        .dietaryWater,
+        .dietaryZinc,
+        .bloodAlcoholContent,
+        .numberOfAlcoholicBeverages,
+        .appleWalkingSteadiness,
+        .sixMinuteWalkTestDistance,
+        .walkingSpeed,
+        .walkingStepLength,
+        .walkingAsymmetryPercentage,
+        .walkingDoubleSupportPercentage,
+        .stairAscentSpeed,
+        .stairDescentSpeed,
+        .uvExposure,
+        .underwaterDepth,
+        .waterTemperature,
+        .cyclingCadence,
+        .cyclingFunctionalThresholdPower,
+        .cyclingPower,
+        .cyclingSpeed,
+        .environmentalSoundReduction,
+        .physicalEffort,
+        .timeInDaylight,
+    ]
 }

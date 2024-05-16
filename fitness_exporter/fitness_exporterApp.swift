@@ -11,7 +11,9 @@ import SwiftUI
 struct fitness_exporterApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            NavigationView {
+                DateRangeExporterView()
+            }
         }
     }
 }
