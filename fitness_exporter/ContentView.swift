@@ -2,7 +2,7 @@ import HealthKit
 import SwiftUI
 
 struct DateRangeExporterView: View {
-    private static let batchSizeDays = 1
+    private static let batchSizeDays = 30
     
     struct ExportTask {
         var healthStore: HKHealthStore
@@ -20,7 +20,7 @@ struct DateRangeExporterView: View {
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var progress: Double = 0
-    @State private var server: String = "http://192.168.1.67:8000/upload/"
+    @State private var server: String = "https://192.168.1.67:8000/upload/"
     @State private var isExporting: Bool = false
     
     var body: some View {
@@ -100,6 +100,9 @@ struct DateRangeExporterView: View {
                 return
             }
             
+//            let sampleTypesOfInterest_ = [
+//                HKSampleType.quantityType(forIdentifier: HKQuantityTypeIdentifier.distanceWalkingRunning)!,
+//            ]
 //            let sampleTypesOfInterest_ = [
 //                HKSeriesType.workoutRoute(),
 //                HKSeriesType.heartbeat(),
