@@ -3,6 +3,43 @@ import HealthKit
 import CoreLocation
 import CryptoKit
 import Security
+import zlib
+
+func compress(data: Data) -> Data? {
+    guard !data.isEmpty else { return nil }
+    
+    var stream = z_stream()
+    stream.next_in = UnsafeMutablePointer<Bytef>(mutating: (data as NSData).bytes.bindMemory(to: Bytef.self, capacity: data.count))
+    stream.avail_in = uint(data.count)
+    
+    let chunkSize = 16384
+    var output = Data()
+    
+    // Initialize the stream for gzip compression
+    deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+    
+    repeat {
+        // Allocate a buffer for the output data
+        let buffer = Data(count: chunkSize)
+        stream.next_out = UnsafeMutablePointer<Bytef>(mutating: (buffer as NSData).bytes.bindMemory(to: Bytef.self, capacity: buffer.count))
+        stream.avail_out = uint(buffer.count)
+        
+        // Perform the compression
+        deflate(&stream, Z_FINISH)
+        
+        // Calculate the number of bytes that were actually written
+        let compressedSize = buffer.count - Int(stream.avail_out)
+        
+        // Append the compressed data to the output
+        output.append(buffer.prefix(compressedSize))
+        
+    } while stream.avail_out == 0
+    
+    // Clean up the stream
+    deflateEnd(&stream)
+    
+    return output
+}
 
 func loadCertificate() -> SecCertificate? {
     guard let certPath = Bundle.main.path(forResource: "cert", ofType: "der") else {
@@ -46,7 +83,6 @@ class CustomSessionDelegate: NSObject, URLSessionDelegate {
             let localCertificateData = SecCertificateCopyData(certificate) as Data
             
             if serverCertificateData == localCertificateData {
-                print("Certificate trusted")
                 let credential = URLCredential(trust: serverTrust)
                 completionHandler(.useCredential, credential)
                 return
@@ -64,12 +100,13 @@ enum ExtractionError: Error {
 
 class HealthDataExporter {
     static let VERSION = "v0"
-    static let BATCH_SIZE = 1024
+    static let PAYLOAD_SEND_THRESHOLD = 100 * (1<<20)
 
     private var healthStore: HKHealthStore
     private var server: String
     private var session: URLSession
     private var payloads: [Data]
+    private var payloadsSize = 0
 
     init(healthStore: HKHealthStore, server : String) {
         self.healthStore = healthStore
@@ -83,6 +120,7 @@ class HealthDataExporter {
         self.session = URLSession(configuration: configuration, delegate: CustomSessionDelegate(), delegateQueue: nil)
         
         self.payloads = []
+        self.payloadsSize = 0
     }
 
     func export(sampleType: HKSampleType, from startDate: Date, to endDate: Date, completion: @escaping (String?) -> Void) {
@@ -92,8 +130,7 @@ class HealthDataExporter {
         
         let query = HKSampleQuery(sampleType: sampleType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { (query, samples, error) in
             guard error == nil else {
-                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
-                return
+                return completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
             }
             if let samples = samples {
                 self.exportSamples(samples: samples) {
@@ -102,7 +139,7 @@ class HealthDataExporter {
                         completion(status)
                         return
                     }
-                    self.actuallySendPayloads(completion: completion)
+                    return self.actuallySendPayloads(completion: completion)
                 }
             }
         }
@@ -115,67 +152,54 @@ class HealthDataExporter {
         do {
             jsonData = try JSONEncoder().encode(data)
         } catch {
-            completion("Failed to serialize data: \(error)")
-            return
+            return completion("Failed to serialize data: \(error)")
         }
-        payloads.append(jsonData!)
-        if (payloads.count == HealthDataExporter.BATCH_SIZE) {
-            actuallySendPayloads(completion: completion)
+        self.payloads.append(jsonData!)
+        self.payloadsSize += jsonData!.count
+        if (payloadsSize >= HealthDataExporter.PAYLOAD_SEND_THRESHOLD) {
+            return actuallySendPayloads(completion: completion)
         } else {
-            completion(nil)
+            return completion(nil)
         }
-//        return
-//        if let url = URL(string: server + path) {
-//            var request = URLRequest(url: url)
-//            request.httpMethod = "POST"
-//            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-////            request.httpBody = try! JSONSerialization.data(withJSONObject: ["TODO": 1], options: [])
-//            request.httpBody = jsonData
-//
-//            let task = self.session.dataTask(with: request) { data, response, error in
-//                if let error = error {
-//                    print("Client error: \(error.localizedDescription)")
-//                    completion("Client error: \(error.localizedDescription)")
-//                    return
-//                }
-//                guard let httpResponse = response as? HTTPURLResponse,
-//                      (200...299).contains(httpResponse.statusCode) else {
-//                    print("Server error")
-//                    completion("Server error")
-//                    return
-//                }
-//                completion(nil)
-//            }
-//            task.resume()
-//        }
     }
     
     private func actuallySendPayloads(completion: @escaping (String?) -> Void) {
+        if self.payloads.isEmpty {
+            return completion(nil)
+        }
         print("Preparing to send")
         var requests: [String: [String: Any]] = [:]
         for request in self.payloads {
             let hash = Data(SHA256.hash(data: request))
             let key = hash.map { String(format: "%02hhx", $0) }.joined()
             if (requests.keys.contains(key)) {
-                completion("Duplicate json: \(request)")
+                return completion("Duplicate json: \(request)")
             }
             do {
                 if let decoded = try JSONSerialization.jsonObject(with: request, options: []) as? [String: Any] {
                     requests[key] = decoded
                 }
             } catch {
-                completion("Error decoding JSON data: \(error)")
-                return
+                return completion("Error decoding JSON data: \(error)")
             }
         }
         self.payloads.removeAll()
-        
+        self.payloadsSize = 0
+
         if let url = URL(string: server + "batch") {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
             do {
-                request.httpBody = try JSONSerialization.data(withJSONObject: ["version": HealthDataExporter.VERSION, "payloads": requests])
+                let payload = try JSONSerialization.data(withJSONObject: ["version": HealthDataExporter.VERSION, "payloads": requests])
+                print("Uncompressed size: \(payload.count)")
+                if let compressedData = compress(data: payload) {
+                    print("Compressed size: \(compressedData.count), \(Double(compressedData.count) / Double(payload.count))")
+                    request.httpBody = compressedData
+                } else {
+                    return completion("Failed to compress data")
+                }
             } catch {
                 print("Error encoding combined JSON data: \(error)")
             }
@@ -183,20 +207,19 @@ class HealthDataExporter {
             let task = self.session.dataTask(with: request) { data, response, error in
                 if let error = error {
                     print("Client error: \(error.localizedDescription)")
-                    completion("Client error: \(error.localizedDescription)")
-                    return
+                    return completion("Client error: \(error.localizedDescription)")
                 }
                 guard let httpResponse = response as? HTTPURLResponse,
                       (200...299).contains(httpResponse.statusCode) else {
                     print("Server error")
-                    completion("Server error")
-                    return
+                    return completion("Server error")
                 }
+                print("Sent")
+                return completion(nil)
             }
+            print("Sending")
             task.resume()
         }
-        print("Sent")
-        completion(nil)
     }
 
     private func exportHeartBeatSeries(heartbeatSeries: HKHeartbeatSeriesSample, completion: @escaping (String?) -> Void) {
@@ -206,8 +229,7 @@ class HealthDataExporter {
         let heartbeatSeriesQuery = HKHeartbeatSeriesQuery(heartbeatSeries: heartbeatSeries) {
             (query, timeSinceSeriesStart, precededByGap, done, error) in
             guard error == nil else {
-                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
-                return
+                return completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
             }
             
             timeSinceSeriesStartArr.append(timeSinceSeriesStart)
@@ -235,8 +257,7 @@ class HealthDataExporter {
         let workoutRouteQuery = HKWorkoutRouteQuery(route: workoutRoute) {
             (query, locationsOrNil, done, error) in
             guard error == nil else {
-                completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
-                return
+                return completion("Failed to run query: \(error?.localizedDescription ?? "WTF")")
             }
             
             guard let locations = locationsOrNil else {
@@ -261,29 +282,24 @@ class HealthDataExporter {
     
     private func exportSample(sample: HKSample, completion: @escaping (String?) -> Void) {
         if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
-            self.exportHeartBeatSeries(heartbeatSeries: heartbeatSeries, completion: completion)
-            return
+            return self.exportHeartBeatSeries(heartbeatSeries: heartbeatSeries, completion: completion)
         }
         
         if let workoutRoute = sample as? HKWorkoutRoute {
-            self.exportWorkoutRoute(workoutRoute: workoutRoute, completion: completion)
-            return
+            return self.exportWorkoutRoute(workoutRoute: workoutRoute, completion: completion)
         }
         
         if let workout = sample as? HKWorkout {
-            self.sendPayload(data: self.encodeWorkout(workout: workout), path: "workouts", completion: completion)
-            return
+            return self.sendPayload(data: self.encodeWorkout(workout: workout), path: "workouts", completion: completion)
         }
         if let quanititySample = sample as? HKQuantitySample {
-            self.sendPayload(data: self.encodeQuantitySample(quantitySample: quanititySample), path: "quantity_samples", completion: completion)
-            return
+            return self.sendPayload(data: self.encodeQuantitySample(quantitySample: quanititySample), path: "quantity_samples", completion: completion)
         }
         if let categorySample = sample as? HKCategorySample {
-            self.sendPayload(data: self.encodeCategorySample(categorySample: categorySample), path: "category_samples", completion: completion)
-            return
+            return self.sendPayload(data: self.encodeCategorySample(categorySample: categorySample), path: "category_samples", completion: completion)
         }
 
-        completion("Failed to cast the class: \(type(of: sample)).\n\(sample.description)")
+        return completion("Failed to cast the class: \(type(of: sample)).\n\(sample.description)")
     }
 
     private let sampleQueue = DispatchQueue(label: "com.fitness_exporter.exportQueue")
@@ -294,17 +310,14 @@ class HealthDataExporter {
         func processNextSample() {
             sampleQueue.async {
                 if (index == samples.count) {
-                    completion(nil)
-                    //            actuallySendPayloads(path: "batch", completion: completion)
-                    return;
+                    return self.actuallySendPayloads(completion: completion)
                 }
                 
                 let sample = samples[index]
                 self.exportSample(sample: sample) {
                     status in
                     if let status = status {
-                        completion(status)
-                        return
+                        return completion(status)
                     }
                     index += 1
                     processNextSample()
@@ -315,25 +328,6 @@ class HealthDataExporter {
         processNextSample()
     }
 
-//    private func exportSamples(samples: [HKSample], index: Int, completion: @escaping (String?) -> Void) {
-//        print("\(index) / \(samples.count)")
-//        if (index == samples.count) {
-//            completion(nil)
-////            actuallySendPayloads(path: "batch", completion: completion)
-//            return;
-//        }
-//        
-//        let sample = samples[index]
-//        exportSample(sample: sample) {
-//            status in
-//            if let status = status {
-//                completion(status)
-//                return
-//            }
-//            self.exportSamples(samples: samples, index: index + 1, completion: completion)
-//        }
-//    }
-    
     struct CObjectType: Codable {
         let identifier: String
     }
