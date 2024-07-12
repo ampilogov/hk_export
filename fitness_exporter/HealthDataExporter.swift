@@ -98,14 +98,34 @@ enum ExtractionError: Error {
     case unitParseError(String)
 }
 
+class Payload {
+    let data : Data
+    let type : String
+    
+    init(data : Data, type : String) {
+        self.data = data
+        self.type = type
+    }
+    
+    func size() -> Int {
+        return data.count
+    }
+    
+    func hash() -> String {
+        let hash = Data(SHA256.hash(data: data))
+        let key = hash.map { String(format: "%02hhx", $0) }.joined()
+        return key
+    }
+}
+
 class HealthDataExporter {
-    static let VERSION = "v0"
+    static let VERSION = "v000"
     static let PAYLOAD_SEND_THRESHOLD = 100 * (1<<20)
 
     private var healthStore: HKHealthStore
     private var server: String
     private var session: URLSession
-    private var payloads: [Data]
+    private var payloads: [Payload]
     private var payloadsSize = 0
 
     init(healthStore: HKHealthStore, server : String) {
@@ -147,14 +167,14 @@ class HealthDataExporter {
         healthStore.execute(query)
     }
 
-    private func sendPayload<T: Encodable>(data: T, path: String, completion: @escaping (String?) -> Void) {
+    private func sendPayload<T: Encodable>(data: T, type: String, completion: @escaping (String?) -> Void) {
         var jsonData : Data? = nil
         do {
             jsonData = try JSONEncoder().encode(data)
         } catch {
             return completion("Failed to serialize data: \(error)")
         }
-        self.payloads.append(jsonData!)
+        self.payloads.append(Payload(data: jsonData!, type: type))
         self.payloadsSize += jsonData!.count
         if (payloadsSize >= HealthDataExporter.PAYLOAD_SEND_THRESHOLD) {
             return actuallySendPayloads(completion: completion)
@@ -168,16 +188,14 @@ class HealthDataExporter {
             return completion(nil)
         }
         print("Preparing to send")
-        var requests: [String: [String: Any]] = [:]
+        var requests: [[String: Any]] = []
         for request in self.payloads {
-            let hash = Data(SHA256.hash(data: request))
-            let key = hash.map { String(format: "%02hhx", $0) }.joined()
-            if (requests.keys.contains(key)) {
-                return completion("Duplicate json: \(request)")
-            }
             do {
-                if let decoded = try JSONSerialization.jsonObject(with: request, options: []) as? [String: Any] {
-                    requests[key] = decoded
+                if var decoded = try JSONSerialization.jsonObject(with: request.data, options: []) as? [String: Any] {
+                    // decoded["_id"] = HealthDataExporter.VERSION + "_" + request.hash()
+                    decoded["_version"] = HealthDataExporter.VERSION
+                    decoded["_type"] = request.type
+                    requests.append(decoded)
                 }
             } catch {
                 return completion("Error decoding JSON data: \(error)")
@@ -192,7 +210,7 @@ class HealthDataExporter {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
             do {
-                let payload = try JSONSerialization.data(withJSONObject: ["version": HealthDataExporter.VERSION, "payloads": requests])
+                let payload = try JSONSerialization.data(withJSONObject: ["payloads": requests])
                 print("Uncompressed size: \(payload.count)")
                 if let compressedData = compress(data: payload) {
                     print("Compressed size: \(compressedData.count), \(Double(compressedData.count) / Double(payload.count))")
@@ -242,7 +260,7 @@ class HealthDataExporter {
                 let cSeriesSample = self.encodeHeartbeatSeriesSample(heartbeatSeriesSample: heartbeatSeries,
                                                                      timeSinceSeriesStart: timeSinceSeriesStartArr,
                                                                      precededByGap: precededByGapArr)
-                self.sendPayload(data: cSeriesSample, path: "heartbeat_series", completion: completion)
+                self.sendPayload(data: cSeriesSample, type: "heartbeat_series", completion: completion)
             }
             else if (timeSinceSeriesStartArr.count > heartbeatSeries.count) {
                 fatalError("Too many samples in a HR series")
@@ -271,7 +289,7 @@ class HealthDataExporter {
             }
             if (cLocations.count == workoutRoute.count) {
                 let cLocationsArr = CCLLocations(locations: cLocations)
-                self.sendPayload(data: cLocationsArr, path: "workout_routes", completion: completion)
+                self.sendPayload(data: cLocationsArr, type: "workout_route", completion: completion)
             } else
             if (cLocations.count > workoutRoute.count) {
                 fatalError("Too many samples in workout route")
@@ -290,13 +308,13 @@ class HealthDataExporter {
         }
         
         if let workout = sample as? HKWorkout {
-            return self.sendPayload(data: self.encodeWorkout(workout: workout), path: "workouts", completion: completion)
+            return self.sendPayload(data: self.encodeWorkout(workout: workout), type: "workout", completion: completion)
         }
         if let quanititySample = sample as? HKQuantitySample {
-            return self.sendPayload(data: self.encodeQuantitySample(quantitySample: quanititySample), path: "quantity_samples", completion: completion)
+            return self.sendPayload(data: self.encodeQuantitySample(quantitySample: quanititySample), type: "quantity_sample", completion: completion)
         }
         if let categorySample = sample as? HKCategorySample {
-            return self.sendPayload(data: self.encodeCategorySample(categorySample: categorySample), path: "category_samples", completion: completion)
+            return self.sendPayload(data: self.encodeCategorySample(categorySample: categorySample), type: "category_sample", completion: completion)
         }
 
         return completion("Failed to cast the class: \(type(of: sample)).\n\(sample.description)")

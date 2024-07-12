@@ -139,6 +139,7 @@ struct DateRangeExporterView: View {
             DispatchQueue.main.async {
                 self.progress = 1.0
                 self.isExporting = false
+                UIApplication.shared.isIdleTimerDisabled = false
             }
             return
         }
@@ -149,6 +150,7 @@ struct DateRangeExporterView: View {
         DispatchQueue.main.async {
             self.isExporting = true
             self.nextExportTaskIndex += 1
+            UIApplication.shared.isIdleTimerDisabled = false
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
