@@ -8,23 +8,29 @@
 
 /* Begin PBXBuildFile section */
 		AC6C784D2BAF905500E4A6C3 /* fitness_exporterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */; };
-		AC6C784F2BAF905500E4A6C3 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C784E2BAF905500E4A6C3 /* ContentView.swift */; };
+		AC6C784F2BAF905500E4A6C3 /* ExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C784E2BAF905500E4A6C3 /* ExportView.swift */; };
 		AC6C78512BAF905700E4A6C3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78502BAF905700E4A6C3 /* Assets.xcassets */; };
 		AC6C78542BAF905700E4A6C3 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78532BAF905700E4A6C3 /* Preview Assets.xcassets */; };
 		AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */; };
 		AC71AF402BFF02B2003A1811 /* cert.der in Resources */ = {isa = PBXBuildFile; fileRef = AC71AF3F2BFF02B2003A1811 /* cert.der */; };
+		ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */; };
+		ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F33A2D193E550059ADA2 /* LogView.swift */; };
+		ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		AC6C78492BAF905500E4A6C3 /* fitness_exporter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = fitness_exporter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = fitness_exporterApp.swift; sourceTree = "<group>"; };
-		AC6C784E2BAF905500E4A6C3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AC6C784E2BAF905500E4A6C3 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
 		AC6C78502BAF905700E4A6C3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AC6C78532BAF905700E4A6C3 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataExporter.swift; sourceTree = "<group>"; };
 		AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = fitness_exporter.entitlements; sourceTree = "<group>"; };
 		AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Info.plist"; sourceTree = SOURCE_ROOT; };
 		AC71AF3F2BFF02B2003A1811 /* cert.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = cert.der; sourceTree = "<group>"; };
+		ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomLogger.swift; sourceTree = "<group>"; };
+		ACC4F33A2D193E550059ADA2 /* LogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogView.swift; sourceTree = "<group>"; };
+		ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -57,10 +63,13 @@
 		AC6C784B2BAF905500E4A6C3 /* fitness_exporter */ = {
 			isa = PBXGroup;
 			children = (
+				ACC4F33A2D193E550059ADA2 /* LogView.swift */,
+				ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */,
+				ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */,
 				AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */,
 				AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */,
 				AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */,
-				AC6C784E2BAF905500E4A6C3 /* ContentView.swift */,
+				AC6C784E2BAF905500E4A6C3 /* ExportView.swift */,
 				AC6C78502BAF905700E4A6C3 /* Assets.xcassets */,
 				AC6C78522BAF905700E4A6C3 /* Preview Content */,
 				AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */,
@@ -148,9 +157,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */,
+				ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */,
 				AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */,
-				AC6C784F2BAF905500E4A6C3 /* ContentView.swift in Sources */,
+				AC6C784F2BAF905500E4A6C3 /* ExportView.swift in Sources */,
 				AC6C784D2BAF905500E4A6C3 /* fitness_exporterApp.swift in Sources */,
+				ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
