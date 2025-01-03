@@ -34,9 +34,15 @@ struct ContentView: View {
 
             LogView()
                 .tabItem {
-                    Label("Logs", systemImage: "gear")
+                    Label("Logs", systemImage: "list.bullet.rectangle")
+                }
+
+            SettingsView()
+                .tabItem {
+                    Label("Settings", systemImage: "gear")
                 }
         }
         .disabled(isExporting)
+        .blur(radius: isExporting ? 1.0 : 0)
     }
 }

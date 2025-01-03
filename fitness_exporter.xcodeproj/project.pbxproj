@@ -12,9 +12,14 @@
 		AC6C78512BAF905700E4A6C3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78502BAF905700E4A6C3 /* Assets.xcassets */; };
 		AC6C78542BAF905700E4A6C3 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78532BAF905700E4A6C3 /* Preview Assets.xcassets */; };
 		AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */; };
-		AC71AF402BFF02B2003A1811 /* cert.der in Resources */ = {isa = PBXBuildFile; fileRef = AC71AF3F2BFF02B2003A1811 /* cert.der */; };
 		ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */; };
 		ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F33A2D193E550059ADA2 /* LogView.swift */; };
+		ACC4F33D2D1FBCCC0059ADA2 /* server_cert.der in Resources */ = {isa = PBXBuildFile; fileRef = ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */; };
+		ACC4F3412D1FBCE80059ADA2 /* client_cert.p12 in Resources */ = {isa = PBXBuildFile; fileRef = ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */; };
+		ACC4F3432D1FC4F60059ADA2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */; };
+		ACC4F3452D211D2B0059ADA2 /* IncrementalExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */; };
+		ACC4F3472D271D840059ADA2 /* ServerAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3462D271D010059ADA2 /* ServerAPI.swift */; };
+		ACC4F3492D2740B80059ADA2 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3482D2740B60059ADA2 /* Constants.swift */; };
 		ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
 
@@ -27,9 +32,14 @@
 		AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataExporter.swift; sourceTree = "<group>"; };
 		AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = fitness_exporter.entitlements; sourceTree = "<group>"; };
 		AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Info.plist"; sourceTree = SOURCE_ROOT; };
-		AC71AF3F2BFF02B2003A1811 /* cert.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = cert.der; sourceTree = "<group>"; };
 		ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomLogger.swift; sourceTree = "<group>"; };
 		ACC4F33A2D193E550059ADA2 /* LogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogView.swift; sourceTree = "<group>"; };
+		ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = server_cert.der; sourceTree = "<group>"; };
+		ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */ = {isa = PBXFileReference; lastKnownFileType = file; path = client_cert.p12; sourceTree = "<group>"; };
+		ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncrementalExporter.swift; sourceTree = "<group>"; };
+		ACC4F3462D271D010059ADA2 /* ServerAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerAPI.swift; sourceTree = "<group>"; };
+		ACC4F3482D2740B60059ADA2 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -63,6 +73,12 @@
 		AC6C784B2BAF905500E4A6C3 /* fitness_exporter */ = {
 			isa = PBXGroup;
 			children = (
+				ACC4F3482D2740B60059ADA2 /* Constants.swift */,
+				ACC4F3462D271D010059ADA2 /* ServerAPI.swift */,
+				ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */,
+				ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */,
+				ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */,
+				ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */,
 				ACC4F33A2D193E550059ADA2 /* LogView.swift */,
 				ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */,
 				ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */,
@@ -73,7 +89,6 @@
 				AC6C78502BAF905700E4A6C3 /* Assets.xcassets */,
 				AC6C78522BAF905700E4A6C3 /* Preview Content */,
 				AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */,
-				AC71AF3F2BFF02B2003A1811 /* cert.der */,
 			);
 			path = fitness_exporter;
 			sourceTree = "<group>";
@@ -144,8 +159,9 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AC71AF402BFF02B2003A1811 /* cert.der in Resources */,
+				ACC4F3412D1FBCE80059ADA2 /* client_cert.p12 in Resources */,
 				AC6C78542BAF905700E4A6C3 /* Preview Assets.xcassets in Resources */,
+				ACC4F33D2D1FBCCC0059ADA2 /* server_cert.der in Resources */,
 				AC6C78512BAF905700E4A6C3 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -157,12 +173,16 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ACC4F3432D1FC4F60059ADA2 /* SettingsView.swift in Sources */,
 				ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */,
 				ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */,
 				AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */,
 				AC6C784F2BAF905500E4A6C3 /* ExportView.swift in Sources */,
+				ACC4F3492D2740B80059ADA2 /* Constants.swift in Sources */,
 				AC6C784D2BAF905500E4A6C3 /* fitness_exporterApp.swift in Sources */,
 				ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */,
+				ACC4F3472D271D840059ADA2 /* ServerAPI.swift in Sources */,
+				ACC4F3452D211D2B0059ADA2 /* IncrementalExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,7 +241,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -278,7 +298,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -308,7 +328,7 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.3;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -343,7 +363,7 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.3;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

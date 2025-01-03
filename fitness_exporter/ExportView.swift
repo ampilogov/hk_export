@@ -17,39 +17,56 @@ struct DateRangeExporterView: View {
     @State private var nextExportTaskIndex = 0
 
     @State private var startDate: Date =
-        Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        Calendar.current.date(byAdding: .day, value: -31, to: Date()) ?? Date()
     @State private var endDate: Date = Date()
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var progress: Double = 0
-    @AppStorage("serverURL") private var server: String =
-        "https://192.168.1.67:8000/upload/"
-    @AppStorage("sender") private var sender: String = ""
+    @AppStorage(UserDefaultsKeys.SERVER_URL) private var server: String =
+        ""
+    @AppStorage(UserDefaultsKeys.SENDER) private var sender: String = ""
     @Binding var isExporting: Bool
 
     var body: some View {
         Form {
-            Section(header: Text("Server")) {
-                TextField("server", text: $server)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .padding()
-            }
-            Section(header: Text("Sender")) {
-                TextField("Sender", text: $sender)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .padding()
-            }
-
             Section(header: Text("Select Date Range")) {
                 DatePicker(
                     "Start Date:", selection: $startDate,
                     displayedComponents: .date
                 )
                 .datePickerStyle(CompactDatePickerStyle())
+
                 DatePicker(
                     "End Date:", selection: $endDate, displayedComponents: .date
                 )
                 .datePickerStyle(CompactDatePickerStyle())
+
+                HStack {
+                    Button("7d") {
+                        updateDates(for: 7)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
+                    Button("35d") {
+                        updateDates(for: 35)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
+                    Button("100d") {
+                        updateDates(for: 100)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
+                    Button("1y") {
+                        updateDates(for: 365)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
+                    Button("20y") {
+                        updateDates(for: 3650 * 2)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                }
             }
 
             Section {
@@ -81,35 +98,27 @@ struct DateRangeExporterView: View {
         }
     }
 
+    private func updateDates(for days: Int) {
+        let today = Date()
+        endDate = today
+        startDate =
+            Calendar.current.date(byAdding: .day, value: -days, to: today)
+            ?? today
+    }
+
     func exportDataInRange(
         from start: Date, to end: Date, server: String, sender: String
     ) {
-        //            let allQuantityTypeIdentifiers: [HKQuantityTypeIdentifier] = [
-        //                .heartRate, .activeEnergyBurned, .flightsClimbed,
-        //            ]
-        let quantityTypeIdentifiersToExport = HealthDataExporter.QUANTITY_TYPES
-        var quantityTypeToExport: [HKQuantityType] = []
-        for quantityTypeIdentifier in quantityTypeIdentifiersToExport {
-            guard
-                let quantityType = HKQuantityType.quantityType(
-                    forIdentifier: quantityTypeIdentifier)
-            else {
-                CustomLogger.log(
-                    "Quantity Type \(quantityTypeIdentifier) is not available in HealthKit"
-                )
-                continue
-            }
-            quantityTypeToExport.append(quantityType)
-        }
-
-        let sampleTypesOfInterest =
-            [
-                HKObjectType.workoutType(),
-                HKObjectType.categoryType(forIdentifier: .mindfulSession)!,
-                HKSeriesType.heartbeat(),
-                HKSeriesType.workoutRoute(),
-            ] + quantityTypeToExport
-
+        //        let exporter = IncrementalExporter()
+        //        exporter.runExport(
+        //            sampleTypes: HealthDataExporter.getSampleTypesOfInterest(),
+        //            batchSize: 60 * 60 * 24 * 31
+        //        ) {
+        //            status in
+        //            CustomLogger.log("Processing task finished: \(status ?? "nil")")
+        //        }
+        //        return
+        //
         let healthStore = HKHealthStore()
         // TODO: utilize this.
         healthStore.enableBackgroundDelivery(
@@ -125,7 +134,7 @@ struct DateRangeExporterView: View {
         }
         healthStore.requestAuthorization(
             toShare: Set([]),
-            read: Set(sampleTypesOfInterest)
+            read: Set(HealthDataExporter.getSampleTypesOfInterest())
         ) { (okay, error) in
             if let error = error {
                 CustomLogger.log("Error requesting authorization: \(error)")
@@ -144,8 +153,15 @@ struct DateRangeExporterView: View {
             //                HKSeriesType.heartbeat(),
             //                HKObjectType.categoryType(forIdentifier: .mindfulSession)!,
             //            ]
+            DispatchQueue.main.async {
+                self.isExporting = true
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+
             exportDataInRangeForTypes(
-                healthStore: healthStore, sampleTypes: sampleTypesOfInterest,
+                healthStore: healthStore,
+                sampleTypes:
+                    HealthDataExporter.getSampleTypesOfInterest(),
                 from: start, to: end, server: server, sender: sender)
         }
     }
@@ -157,13 +173,14 @@ struct DateRangeExporterView: View {
         exportTasks = []
         nextExportTaskIndex = 0
 
-        var currentDate = start
-        while currentDate <= end {
-            let nextDate =
-                Calendar.current.date(
-                    byAdding: .day, value: DateRangeExporterView.batchSizeDays,
-                    to: currentDate) ?? currentDate
-            for sampleType in sampleTypes {
+        for sampleType in sampleTypes {
+            var currentDate = start
+            while currentDate <= end {
+                let nextDate =
+                    Calendar.current.date(
+                        byAdding: .day,
+                        value: DateRangeExporterView.batchSizeDays,
+                        to: currentDate) ?? currentDate
                 exportTasks.append(
                     ExportTask(
                         healthStore: healthStore,
@@ -173,8 +190,8 @@ struct DateRangeExporterView: View {
                         server: server,
                         sender: sender)
                 )
+                currentDate = nextDate
             }
-            currentDate = nextDate
         }
 
         continueExport()
@@ -196,7 +213,7 @@ struct DateRangeExporterView: View {
         DispatchQueue.main.async {
             self.isExporting = true
             self.nextExportTaskIndex += 1
-            UIApplication.shared.isIdleTimerDisabled = false
+            UIApplication.shared.isIdleTimerDisabled = true
         }
 
         DispatchQueue.global(qos: .userInitiated).async {

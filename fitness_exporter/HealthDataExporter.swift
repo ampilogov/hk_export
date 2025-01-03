@@ -5,115 +5,6 @@ import HealthKit
 import Security
 import zlib
 
-func compress(data: Data) -> Data? {
-    guard !data.isEmpty else { return nil }
-
-    var stream = z_stream()
-    stream.next_in = UnsafeMutablePointer<Bytef>(
-        mutating: (data as NSData).bytes.bindMemory(
-            to: Bytef.self, capacity: data.count))
-    stream.avail_in = uint(data.count)
-
-    let chunkSize = 16384
-    var output = Data()
-
-    // Initialize the stream for gzip compression
-    deflateInit2_(
-        &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16, 8,
-        Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
-
-    repeat {
-        // Allocate a buffer for the output data
-        let buffer = Data(count: chunkSize)
-        stream.next_out = UnsafeMutablePointer<Bytef>(
-            mutating: (buffer as NSData).bytes.bindMemory(
-                to: Bytef.self, capacity: buffer.count))
-        stream.avail_out = uint(buffer.count)
-
-        // Perform the compression
-        deflate(&stream, Z_FINISH)
-
-        // Calculate the number of bytes that were actually written
-        let compressedSize = buffer.count - Int(stream.avail_out)
-
-        // Append the compressed data to the output
-        output.append(buffer.prefix(compressedSize))
-
-    } while stream.avail_out == 0
-
-    // Clean up the stream
-    deflateEnd(&stream)
-
-    return output
-}
-
-func loadCertificate() -> SecCertificate? {
-    guard let certPath = Bundle.main.path(forResource: "cert", ofType: "der")
-    else {
-        CustomLogger.log("Failed to find cert.der in bundle")
-        return nil
-    }
-    guard let certData = try? Data(contentsOf: URL(fileURLWithPath: certPath))
-    else {
-        CustomLogger.log("Failed to load data from cert.der")
-        return nil
-    }
-    guard
-        let certificate = SecCertificateCreateWithData(nil, certData as CFData)
-    else {
-        CustomLogger.log("Failed to create certificate from data")
-        return nil
-    }
-    return certificate
-}
-
-class CustomSessionDelegate: NSObject, URLSessionDelegate {
-    func urlSession(
-        _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (
-            URLSession.AuthChallengeDisposition, URLCredential?
-        ) -> Void
-    ) {
-        guard let serverTrust = challenge.protectionSpace.serverTrust else {
-            CustomLogger.log("Failed to get server trust")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        guard let certificate = loadCertificate() else {
-            CustomLogger.log("Failed to load custom certificate")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        // Get the certificate chain
-        guard
-            let certificates = SecTrustCopyCertificateChain(serverTrust)
-                as? [SecCertificate]
-        else {
-            CustomLogger.log("Failed to copy certificate chain")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        for serverCertificate in certificates {
-            let serverCertificateData =
-                SecCertificateCopyData(serverCertificate) as Data
-            let localCertificateData =
-                SecCertificateCopyData(certificate) as Data
-
-            if serverCertificateData == localCertificateData {
-                let credential = URLCredential(trust: serverTrust)
-                completionHandler(.useCredential, credential)
-                return
-            }
-        }
-
-        CustomLogger.log("Certificate not trusted")
-        completionHandler(.cancelAuthenticationChallenge, nil)
-    }
-}
-
 enum ExtractionError: Error {
     case unitParseError(String)
 }
@@ -137,102 +28,8 @@ class Payload {
         return key
     }
 }
-
-class ServerSession {
-    public var server: String
-    private var session: URLSession
-
-    init(server: String, timeout: TimeInterval) {
-        self.server = server
-
-        let configuration = URLSessionConfiguration.default
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        configuration.httpShouldSetCookies = true
-        configuration.httpShouldUsePipelining = true
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
-        self.session = URLSession(
-            configuration: configuration, delegate: CustomSessionDelegate(),
-            delegateQueue: nil)
-    }
-
-    func sendPayloads(
-        payloads: [[String: Any]], completion: @escaping (String?) -> Void
-    ) {
-        if let url = URL(string: server + "batch") {
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue(
-                "application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
-            do {
-                let payload = try JSONSerialization.data(withJSONObject: [
-                    "payloads": payloads
-                ])
-                //                CustomLogger.log("Uncompressed size: \(payload.count)")
-                if let compressedData = compress(data: payload) {
-                    //                    CustomLogger.log("Compressed size: \(compressedData.count), \(Double(compressedData.count) / Double(payload.count))")
-                    request.httpBody = compressedData
-                } else {
-                    return completion("Failed to compress data")
-                }
-            } catch {
-                CustomLogger.log("Error encoding combined JSON data: \(error)")
-            }
-
-            let task = self.session.dataTask(with: request) {
-                data, response, error in
-                if let error = error {
-                    CustomLogger.log(
-                        "Client error: \(error.localizedDescription)")
-                    return completion(
-                        "Client error: \(error.localizedDescription)")
-                }
-                guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode)
-                else {
-                    CustomLogger.log("Server error")
-                    return completion("Server error: \(response)")
-                }
-                CustomLogger.log("Sent")
-                return completion(nil)
-            }
-            CustomLogger.log("Sending")
-            task.resume()
-        } else {
-            return completion("Invalid URL: \(server)batch")
-        }
-    }
-
-    func testConnection(
-        completion: @escaping (String?) -> Void
-    ) {
-        if let url = URL(string: server + "status") {
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            let task = self.session.dataTask(with: request) {
-                data, response, error in
-                if let error = error {
-                    return completion(
-                        "Client error: \(error.localizedDescription)")
-                }
-                guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode)
-                else {
-                    return completion("Server error: \(response)")
-                }
-                return completion(nil)
-            }
-            task.resume()
-        } else {
-            return completion("Invalid URL: \(server)status")
-        }
-    }
-}
-
 class HealthDataExporter {
-    static let VERSION = "v001"
+    static let VERSION = "v003"
     static let SENDER_EXTRA_KEY = "mnluucdsobcbkiae4a98"
 
     static let PAYLOAD_SEND_THRESHOLD = 100 * (1 << 20)
@@ -250,8 +47,8 @@ class HealthDataExporter {
     ) {
         self.healthStore = healthStore
         self.server = server
-        self.serverSession = ServerSession(server: server, timeout: 15)
-        self.serverSessionQuick = ServerSession(server: server, timeout: 1)
+        self.serverSession = ServerSession(server: server)
+        self.serverSessionQuick = ServerSession(server: server)
         self.sender = sender
 
         self.payloads = []
@@ -262,7 +59,7 @@ class HealthDataExporter {
         sampleType: HKSampleType, from startDate: Date, to endDate: Date,
         completion: @escaping (String?) -> Void
     ) {
-        self.serverSessionQuick.testConnection { result in
+        self.serverSessionQuick.testConnection(timeout: 1) { result in
             if result != nil {
                 return completion(result)
             }
@@ -303,7 +100,8 @@ class HealthDataExporter {
                         completion(status)
                         return
                     }
-                    return self.actuallySendPayloads(completion: completion)
+                    return self.actuallySendPayloadsPList(
+                        completion: completion)
                 }
             }
         }
@@ -311,7 +109,7 @@ class HealthDataExporter {
         healthStore.execute(query)
     }
 
-    private func sendPayload<T: Encodable>(
+    private func sendPayloadJson<T: Encodable>(
         data: T, type: String, completion: @escaping (String?) -> Void
     ) {
         var jsonData: Data? = nil
@@ -323,13 +121,36 @@ class HealthDataExporter {
         self.payloads.append(Payload(data: jsonData!, type: type))
         self.payloadsSize += jsonData!.count
         if payloadsSize >= HealthDataExporter.PAYLOAD_SEND_THRESHOLD {
-            return actuallySendPayloads(completion: completion)
+            return actuallySendPayloadsJson(completion: completion)
         } else {
             return completion(nil)
         }
     }
 
-    private func actuallySendPayloads(completion: @escaping (String?) -> Void) {
+    private func sendPayloadPList<T: Encodable>(
+        data: T, type: String, completion: @escaping (String?) -> Void
+    ) {
+        do {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            let plistData = try encoder.encode(data)
+            let payload = Payload(data: plistData, type: type)
+            self.payloads.append(payload)
+            self.payloadsSize += plistData.count
+        } catch {
+            return completion(
+                "Failed to serialize data: \(error.localizedDescription)")
+        }
+        if payloadsSize >= HealthDataExporter.PAYLOAD_SEND_THRESHOLD {
+            return actuallySendPayloadsPList(completion: completion)
+        } else {
+            return completion(nil)
+        }
+    }
+
+    private func actuallySendPayloadsJson(
+        completion: @escaping (String?) -> Void
+    ) {
         if self.payloads.isEmpty {
             return completion(nil)
         }
@@ -357,8 +178,52 @@ class HealthDataExporter {
         self.payloads.removeAll()
         self.payloadsSize = 0
 
-        return self.serverSession.sendPayloads(
+        return self.serverSession.sendPayloadsPList(
             payloads: requests, completion: completion)
+    }
+
+    private func actuallySendPayloadsPList(
+        completion: @escaping (String?) -> Void
+    ) {
+        if self.payloads.isEmpty {
+            return completion(nil)
+        }
+        //        CustomLogger.log("Preparing to send")
+        var requests: [[String: Any]] = []
+        for request in self.payloads {
+            let payload =
+                [
+                    "version": HealthDataExporter.VERSION,
+                    "data": request.data,
+                    "type": request.type,
+                    "sender_sha256": SHA256.hash(
+                        data: Data(
+                            (self.sender
+                                + HealthDataExporter.SENDER_EXTRA_KEY)
+                                .utf8)
+                    ).compactMap { String(format: "%02x", $0) }.joined(),
+                ] as [String: Any]
+            requests.append(payload)
+        }
+        self.payloads.removeAll()
+        self.payloadsSize = 0
+
+        return self.serverSession.sendPayloadsPList(
+            payloads: requests, completion: completion)
+    }
+
+    private func sendPayload<T: Encodable>(
+        data: T, type: String, completion: @escaping (String?) -> Void
+    ) {
+        //        sendPayloadJson(data: data, type: type, completion: completion)
+        sendPayloadPList(data: data, type: type, completion: completion)
+    }
+
+    private func actuallySendPayloads(
+        completion: @escaping (String?) -> Void
+    ) {
+        //        actuallySendPayloadsJson(completion: completion)
+        actuallySendPayloadsPList(completion: completion)
     }
 
     private func exportHeartBeatSeries(
@@ -443,36 +308,56 @@ class HealthDataExporter {
     private func exportSample(
         sample: HKSample, completion: @escaping (String?) -> Void
     ) {
-        if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
-            return self.exportHeartBeatSeries(
-                heartbeatSeries: heartbeatSeries, completion: completion)
-        }
+        do {
+            if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
+                return self.exportHeartBeatSeries(
+                    heartbeatSeries: heartbeatSeries, completion: completion)
+            }
 
-        if let workoutRoute = sample as? HKWorkoutRoute {
-            return self.exportWorkoutRoute(
-                workoutRoute: workoutRoute, completion: completion)
-        }
+            if let workoutRoute = sample as? HKWorkoutRoute {
+                return self.exportWorkoutRoute(
+                    workoutRoute: workoutRoute, completion: completion)
+            }
 
-        if let workout = sample as? HKWorkout {
-            return self.sendPayload(
-                data: self.encodeWorkout(workout: workout), type: "workout",
-                completion: completion)
-        }
-        if let quanititySample = sample as? HKQuantitySample {
-            return self.sendPayload(
-                data: self.encodeQuantitySample(
-                    quantitySample: quanititySample), type: "quantity_sample",
-                completion: completion)
-        }
-        if let categorySample = sample as? HKCategorySample {
-            return self.sendPayload(
-                data: self.encodeCategorySample(categorySample: categorySample),
-                type: "category_sample", completion: completion)
-        }
+            if let workout = sample as? HKWorkout {
+                return self.sendPayload(
+                    data: try self.encodeWorkout(workout: workout),
+                    type: "workout",
+                    completion: completion)
+            }
+            if let quanititySample = sample as? HKQuantitySample {
+                return self.sendPayload(
+                    data: try self.encodeQuantitySample(
+                        quantitySample: quanititySample),
+                    type: "quantity_sample",
+                    completion: completion)
+            }
+            if let categorySample = sample as? HKCategorySample {
+                return self.sendPayload(
+                    data: self.encodeCategorySample(
+                        categorySample: categorySample),
+                    type: "category_sample", completion: completion)
+            }
+            if let clinicalRecord = sample as? HKClinicalRecord {
+                return self.sendPayload(
+                    data: self.encodeClinicalRecord(
+                        clinicalRecord: clinicalRecord),
+                    type: "clinical_record", completion: completion)
+            }
+            if let stateOfMind = sample as? HKStateOfMind {
+                return self.sendPayload(
+                    data: self.encodeStateOfMind(stateOfMind: stateOfMind),
+                    type: "state_of_mind", completion: completion)
+            }
 
-        return completion(
-            "Failed to cast the class: \(type(of: sample)).\n\(sample.description)"
-        )
+            return completion(
+                "Failed to cast the class: \(type(of: sample)).\n\(sample.description)"
+            )
+        } catch {
+            return completion(
+                "Encountered error while exporting sample: \(error.localizedDescription)"
+            )
+        }
     }
 
     private let sampleQueue = DispatchQueue(
@@ -486,7 +371,8 @@ class HealthDataExporter {
         func processNextSample() {
             sampleQueue.async {
                 if index == samples.count {
-                    return self.actuallySendPayloads(completion: completion)
+                    return self.actuallySendPayloads(
+                        completion: completion)
                 }
 
                 let sample = samples[index]
@@ -654,7 +540,7 @@ class HealthDataExporter {
         let doubleValue: Double
     }
 
-    private func encodeQuantity(quantity: HKQuantity) -> CQuantity {
+    private func encodeQuantity(quantity: HKQuantity) throws -> CQuantity {
         for unit in HealthDataExporter.UNITS {
             if quantity.is(compatibleWith: unit) {
                 return CQuantity(
@@ -663,8 +549,7 @@ class HealthDataExporter {
             }
         }
         CustomLogger.log("Can't find a unit for: \(quantity.description)")
-        return CQuantity(
-            unit: "unknown: \(quantity.description)", doubleValue: Double.nan)
+        throw ExtractionError.unitParseError(quantity.description)
     }
 
     struct CStatistics: Codable {
@@ -688,7 +573,8 @@ class HealthDataExporter {
         let mostRecentQuantityDateInterval: DateInterval?
     }
 
-    private func encodeStatistic(statistic: HKStatistics) -> CStatistics {
+    private func encodeStatistic(statistic: HKStatistics) throws -> CStatistics
+    {
         let sources = statistic.sources?.compactMap {
             source -> (key: String, value: HKSource) in
             return (key: source.name, source)
@@ -697,55 +583,59 @@ class HealthDataExporter {
             dict[tuple.key] = tuple.value
         }
 
-        return CStatistics(
+        return try CStatistics(
             startDate: statistic.startDate,
             endDate: statistic.endDate,
             quantityType: encodeQuantityType(
                 quantityType: statistic.quantityType),
             sources: statistic.sources?.map { encodeSource(source: $0) },
             sourceAverageQuantity: sources?.mapValues {
-                statistic.averageQuantity(for: $0).map {
-                    encodeQuantity(quantity: $0)
+                try statistic.averageQuantity(for: $0).map {
+                    try encodeQuantity(quantity: $0)
                 }
             },
             averageQuantity: statistic.averageQuantity().map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             },
             sourceMaximumQuantity: sources?.mapValues {
-                statistic.maximumQuantity(for: $0).map {
-                    encodeQuantity(quantity: $0)
+                try statistic.maximumQuantity(for: $0).map {
+                    try encodeQuantity(quantity: $0)
                 }
             },
             maximumQuantity: statistic.maximumQuantity().map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             },
             sourceMinimumQuantity: sources?.mapValues {
-                statistic.minimumQuantity(for: $0).map {
-                    encodeQuantity(quantity: $0)
+                try statistic.minimumQuantity(for: $0).map {
+                    try encodeQuantity(quantity: $0)
                 }
             },
             minimumQuantity: statistic.minimumQuantity().map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             },
             sourceSumQuantity: sources?.mapValues {
-                statistic.sumQuantity(for: $0).map {
-                    encodeQuantity(quantity: $0)
+                try statistic.sumQuantity(for: $0).map {
+                    try encodeQuantity(quantity: $0)
                 }
             },
             sumQuantity: statistic.sumQuantity().map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             },
             sourceDuration: sources?.mapValues {
-                statistic.duration(for: $0).map { encodeQuantity(quantity: $0) }
+                try statistic.duration(for: $0).map {
+                    try encodeQuantity(quantity: $0)
+                }
             },
-            duration: statistic.duration().map { encodeQuantity(quantity: $0) },
+            duration: statistic.duration().map {
+                try encodeQuantity(quantity: $0)
+            },
             sourceMostRecentQuantity: sources?.mapValues {
-                statistic.mostRecentQuantity(for: $0).map {
-                    encodeQuantity(quantity: $0)
+                try statistic.mostRecentQuantity(for: $0).map {
+                    try encodeQuantity(quantity: $0)
                 }
             },
             mostRecentQuantity: statistic.mostRecentQuantity().map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             },
             sourceMostRecentQuantityDateInterval: sources?.mapValues {
                 statistic.mostRecentQuantityDateInterval(for: $0)
@@ -770,13 +660,13 @@ class HealthDataExporter {
 
     private func encodeWorkoutConfiguration(
         configuration: HKWorkoutConfiguration
-    ) -> CWorkoutConfiguration {
-        return CWorkoutConfiguration(
+    ) throws -> CWorkoutConfiguration {
+        return try CWorkoutConfiguration(
             activityType: configuration.activityType.rawValue,
             locationType: configuration.locationType.rawValue,
             swimmingLocationType: configuration.swimmingLocationType.rawValue,
             lapLength: configuration.lapLength.map {
-                encodeQuantity(quantity: $0)
+                try encodeQuantity(quantity: $0)
             })
     }
 
@@ -806,9 +696,9 @@ class HealthDataExporter {
     }
 
     private func encodeWorkoutActivity(activity: HKWorkoutActivity)
-        -> CWorkoutActivity
+        throws -> CWorkoutActivity
     {
-        return CWorkoutActivity(
+        return try CWorkoutActivity(
             uuid: activity.uuid,
             startDate: activity.startDate,
             endDate: activity.endDate,
@@ -816,11 +706,11 @@ class HealthDataExporter {
             allStatistics: activity.allStatistics.map {
                 CWorkoutAllStatisticEntry(
                     quantityType: encodeQuantityType(quantityType: $0),
-                    statistic: encodeStatistic(statistic: $1)
+                    statistic: try encodeStatistic(statistic: $1)
                 )
             },
             metadata: activity.metadata?.mapValues({ "\($0)" }),
-            workoutConfiguration: encodeWorkoutConfiguration(
+            workoutConfiguration: try encodeWorkoutConfiguration(
                 configuration: activity.workoutConfiguration),
             workoutEvents: activity.workoutEvents.map {
                 encodeWorkoutEvent(event: $0)
@@ -836,13 +726,13 @@ class HealthDataExporter {
         let allStatistics: [CWorkoutAllStatisticEntry]
     }
 
-    private func encodeWorkout(workout: HKWorkout) -> CWorkout {
-        return CWorkout(
+    private func encodeWorkout(workout: HKWorkout) throws -> CWorkout {
+        return try CWorkout(
             superSample: encodeSample(sample: workout),
             duration: workout.duration,
             workoutActivityType: workout.workoutActivityType.rawValue,
             workoutActivities: workout.workoutActivities.map {
-                encodeWorkoutActivity(activity: $0)
+                try encodeWorkoutActivity(activity: $0)
             },
             workoutEvents: workout.workoutEvents?.map {
                 encodeWorkoutEvent(event: $0)
@@ -850,7 +740,7 @@ class HealthDataExporter {
             allStatistics: workout.allStatistics.map {
                 CWorkoutAllStatisticEntry(
                     quantityType: encodeQuantityType(quantityType: $0),
-                    statistic: encodeStatistic(statistic: $1)
+                    statistic: try encodeStatistic(statistic: $1)
                 )
             }
         )
@@ -864,11 +754,12 @@ class HealthDataExporter {
     }
 
     private func encodeQuantitySample(quantitySample: HKQuantitySample)
+        throws
         -> CQuantitySample
     {
         return CQuantitySample(
             superSample: encodeSample(sample: quantitySample),
-            quantity: encodeQuantity(quantity: quantitySample.quantity),
+            quantity: try encodeQuantity(quantity: quantitySample.quantity),
             count: quantitySample.count,
             quantityType: encodeQuantityType(
                 quantityType: quantitySample.quantityType))
@@ -968,6 +859,91 @@ class HealthDataExporter {
             value: categorySample.value)
     }
 
+    struct CClinicalType: Codable {
+        let superSampleType: CSampleType
+    }
+
+    private func encodeClinicalType(ct: HKClinicalType) -> CClinicalType {
+        return CClinicalType(superSampleType: encodeSampleType(st: ct))
+    }
+
+    struct CFHIRVersion: Codable {
+        let majorVersion: Int
+        let minorVersion: Int
+        let patchVersion: Int
+        let stringRepresentation: String
+        let fhirRelease: String
+
+    }
+
+    private func encodeFHIRVersion(version: HKFHIRVersion) -> CFHIRVersion {
+        return CFHIRVersion(
+            majorVersion: version.majorVersion,
+            minorVersion: version.minorVersion,
+            patchVersion: version.patchVersion,
+            stringRepresentation: version.stringRepresentation,
+            fhirRelease: version.fhirRelease.rawValue)
+    }
+
+    struct CFHIRResource: Codable {
+        let identifier: String
+        let fhirVersion: CFHIRVersion
+        let resourceType: String
+        let sourceURL: URL?
+        let data: Data
+    }
+
+    private func encodeFHIRResource(fhirResource: HKFHIRResource?)
+        -> CFHIRResource?
+    {
+        guard let fhirResource = fhirResource else { return nil }
+        return CFHIRResource(
+            identifier: fhirResource.identifier,
+            fhirVersion: encodeFHIRVersion(version: fhirResource.fhirVersion),
+            resourceType: fhirResource.resourceType.rawValue,
+            sourceURL: fhirResource.sourceURL,
+            data: fhirResource.data)
+    }
+
+    struct CClinicalRecord: Codable {
+        let superSample: CSample
+        let clinicalType: CClinicalType
+        let displayName: String
+        let fhirResource: CFHIRResource?
+    }
+
+    private func encodeClinicalRecord(clinicalRecord: HKClinicalRecord)
+        -> CClinicalRecord
+    {
+        return CClinicalRecord(
+            superSample: encodeSample(sample: clinicalRecord),
+            clinicalType: encodeClinicalType(ct: clinicalRecord.clinicalType),
+            displayName: clinicalRecord.displayName,
+            fhirResource: encodeFHIRResource(
+                fhirResource: clinicalRecord.fhirResource))
+    }
+
+    struct CStateOfMind: Codable {
+        let superSample: CSample
+        let associations: [Int]
+        let kind: Int
+        let labels: [Int]
+        let valence: Double
+        let valenceClassification: Int
+    }
+
+    private func encodeStateOfMind(stateOfMind: HKStateOfMind)
+        -> CStateOfMind
+    {
+        return CStateOfMind(
+            superSample: encodeSample(sample: stateOfMind),
+            associations: stateOfMind.associations.map { $0.rawValue },
+            kind: stateOfMind.kind.rawValue,
+            labels: stateOfMind.labels.map { $0.rawValue },
+            valence: stateOfMind.valence,
+            valenceClassification: stateOfMind.valenceClassification.rawValue)
+    }
+
     static let UNITS = [
         HKUnit.gram(),
         HKUnit.meter(),
@@ -986,6 +962,7 @@ class HealthDataExporter {
         HKUnit.decibelAWeightedSoundPressureLevel(),
         HKUnit.init(from: "mL/min·kg"),
         HKUnit.init(from: "kcal/hr·kg"),
+        HKUnit.appleEffortScore(),
         //            HKUnit.siemen(),
         //            HKUnit.volt(),
         //            HKUnit.internationalUnit(),
@@ -1097,12 +1074,126 @@ class HealthDataExporter {
         .uvExposure,
         .underwaterDepth,
         .waterTemperature,
+        .appleSleepingBreathingDisturbances,
+        .crossCountrySkiingSpeed,
         .cyclingCadence,
         .cyclingFunctionalThresholdPower,
         .cyclingPower,
         .cyclingSpeed,
+        .distanceCrossCountrySkiing,
+        .distancePaddleSports,
+        .distanceRowing,
+        .distanceSkatingSports,
         .environmentalSoundReduction,
+        .estimatedWorkoutEffortScore,
+        .paddleSportsSpeed,
         .physicalEffort,
+        .rowingSpeed,
         .timeInDaylight,
+        .workoutEffortScore,
     ]
+
+    static let CATEGORY_TYPES: [HKCategoryTypeIdentifier] = [
+        .appleStandHour,
+        .lowCardioFitnessEvent,
+        .menstrualFlow,
+        .intermenstrualBleeding,
+        .infrequentMenstrualCycles,
+        .irregularMenstrualCycles,
+        .persistentIntermenstrualBleeding,
+        .prolongedMenstrualPeriods,
+        .cervicalMucusQuality,
+        .ovulationTestResult,
+        .progesteroneTestResult,
+        .sexualActivity,
+        .contraceptive,
+        .pregnancy,
+        .pregnancyTestResult,
+        .lactation,
+        .environmentalAudioExposureEvent,
+        .headphoneAudioExposureEvent,
+        // .audioExposureEvent,
+        .lowHeartRateEvent,
+        .highHeartRateEvent,
+        .irregularHeartRhythmEvent,
+        .appleWalkingSteadinessEvent,
+        .abdominalCramps,
+        .bloating,
+        .constipation,
+        .diarrhea,
+        .heartburn,
+        .nausea,
+        .vomiting,
+        .appetiteChanges,
+        .chills,
+        .dizziness,
+        .fainting,
+        .fatigue,
+        .fever,
+        .generalizedBodyAche,
+        .hotFlashes,
+        .chestTightnessOrPain,
+        .coughing,
+        .rapidPoundingOrFlutteringHeartbeat,
+        .shortnessOfBreath,
+        .skippedHeartbeat,
+        .wheezing,
+        .lowerBackPain,
+        .headache,
+        .memoryLapse,
+        .moodChanges,
+        .lossOfSmell,
+        .lossOfTaste,
+        .runnyNose,
+        .soreThroat,
+        .sinusCongestion,
+        .breastPain,
+        .pelvicPain,
+        .vaginalDryness,
+        .acne,
+        .drySkin,
+        .hairLoss,
+        .nightSweats,
+        .sleepChanges,
+        .bladderIncontinence,
+        .mindfulSession,
+        .sleepAnalysis,
+        .toothbrushingEvent,
+        .handwashingEvent,
+        .bleedingAfterPregnancy,
+        .bleedingDuringPregnancy,
+        .sleepApneaEvent,
+    ]
+
+    static let CLINICAL_TYPES: [HKClinicalTypeIdentifier] = [
+        .allergyRecord,
+        .clinicalNoteRecord,
+        .conditionRecord,
+        .immunizationRecord,
+        .labResultRecord,
+        .medicationRecord,
+        .procedureRecord,
+        .vitalSignRecord,
+        .coverageRecord,
+    ]
+
+    static func getSampleTypesOfInterest() -> [HKSampleType] {
+        let sampleTypesOfInterest =
+            [
+                HKObjectType.workoutType(),
+                HKSeriesType.heartbeat(),
+                HKSeriesType.workoutRoute(),
+                HKObjectType.stateOfMindType(),
+            ]
+            + HealthDataExporter.QUANTITY_TYPES.map {
+                HKQuantityType.quantityType(forIdentifier: $0)!
+            }
+            + HealthDataExporter.CATEGORY_TYPES.map {
+                HKCategoryType.categoryType(forIdentifier: $0)!
+            }
+            + HealthDataExporter.CLINICAL_TYPES.map {
+                HKClinicalType.clinicalType(forIdentifier: $0)!
+            }
+        return Array(Set(sampleTypesOfInterest))
+    }
 }
