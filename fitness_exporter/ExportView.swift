@@ -5,7 +5,6 @@ struct DateRangeExporterView: View {
     private static let batchSizeDays = 30
 
     struct ExportTask {
-        var healthStore: HKHealthStore
         var sampleType: HKSampleType
         var start: Date
         var end: Date
@@ -134,7 +133,7 @@ struct DateRangeExporterView: View {
         }
         healthStore.requestAuthorization(
             toShare: Set([]),
-            read: Set(HealthDataExporter.getSampleTypesOfInterest())
+            read: Set(ExportConstants.getSampleTypesOfInterest())
         ) { (okay, error) in
             if let error = error {
                 CustomLogger.log("Error requesting authorization: \(error)")
@@ -159,15 +158,14 @@ struct DateRangeExporterView: View {
             }
 
             exportDataInRangeForTypes(
-                healthStore: healthStore,
                 sampleTypes:
-                    HealthDataExporter.getSampleTypesOfInterest(),
+                    ExportConstants.getSampleTypesOfInterest(),
                 from: start, to: end, server: server, sender: sender)
         }
     }
 
     func exportDataInRangeForTypes(
-        healthStore: HKHealthStore, sampleTypes: [HKSampleType],
+        sampleTypes: [HKSampleType],
         from start: Date, to end: Date, server: String, sender: String
     ) {
         exportTasks = []
@@ -183,7 +181,6 @@ struct DateRangeExporterView: View {
                         to: currentDate) ?? currentDate
                 exportTasks.append(
                     ExportTask(
-                        healthStore: healthStore,
                         sampleType: sampleType,
                         start: currentDate,
                         end: min(nextDate, end),
@@ -222,9 +219,7 @@ struct DateRangeExporterView: View {
             }
 
             let exporter = HealthDataExporter(
-                healthStore: task.healthStore,
-                server: server,
-                sender: task.sender)
+                server: server, sender: task.sender)
             exporter.export(
                 sampleType: task.sampleType, from: task.start, to: task.end
             ) { error in

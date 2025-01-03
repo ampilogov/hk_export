@@ -22,9 +22,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         do {
             try BGTaskScheduler.shared.submit(request)
-            CustomLogger.log("Scheduled app refresh task")
+            CustomLogger.log("[App] Scheduled app refresh task")
         } catch {
-            CustomLogger.log("Could not schedule app refresh task: \(error)")
+            CustomLogger.log("[App] Could not schedule app refresh task: \(error)")
         }
     }
 
@@ -35,9 +35,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             request.requiresNetworkConnectivity = true
             request.requiresExternalPower = false
             try BGTaskScheduler.shared.submit(request)
-            CustomLogger.log("Scheduled processing task")
+            CustomLogger.log("[App] Scheduled processing task")
         } catch {
-            CustomLogger.log("Failed to schedule processing task: \(error)")
+            CustomLogger.log("[App] Failed to schedule processing task: \(error)")
         }
     }
 
@@ -56,7 +56,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         os_log(
             "App launched with background fetch enabled", log: OSLog.default,
             type: .info)
-        CustomLogger.log("App launched with background fetch enabled")
+        CustomLogger.log("[App] App launched with background fetch enabled")
 
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: AppDelegate.BG_APP_REFRESH_IDENTIFIER,
@@ -79,47 +79,45 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func handleAppRefreshTask(task: BGAppRefreshTask) {
-        os_log("App refresh task started", log: OSLog.default, type: .info)
-        CustomLogger.log("App refresh task started")
+        CustomLogger.log("[App] App refresh task started")
 
         // Schedule the next task
         scheduleAppRefreshTask()
 
         task.expirationHandler = {
-            CustomLogger.log("App refresh task is about to expire")
+            CustomLogger.log("[App] App refresh task is about to expire")
             task.setTaskCompleted(success: true)
         }
 
         let exporter = IncrementalExporter()
         exporter.run(
-            sampleTypes: HealthDataExporter.getSampleTypesOfInterest(),
+            sampleTypes: ExportConstants.getSampleTypesOfInterest(),
             batchSize: 60 * 60 * 24 * 3
         ) {
             status in
-            CustomLogger.log("App refresh task finished: \(status ?? "nil")")
+            CustomLogger.log("[App] App refresh task finished: \(status ?? "nil")")
             task.setTaskCompleted(success: true)
         }
     }
 
     func handleProcessingTask(task: BGProcessingTask) {
-        os_log("Processing task started", log: OSLog.default, type: .info)
-        CustomLogger.log("Processing task started")
+        CustomLogger.log("[App] Processing task started")
 
         // Schedule the next processing task
         scheduleProcessingTask()
 
         task.expirationHandler = {
-            CustomLogger.log("Processing task is about to expire")
+            CustomLogger.log("[App] Processing task is about to expire")
             task.setTaskCompleted(success: true)
         }
 
         let exporter = IncrementalExporter()
         exporter.run(
-            sampleTypes: HealthDataExporter.getSampleTypesOfInterest(),
+            sampleTypes: ExportConstants.getSampleTypesOfInterest(),
             batchSize: 60 * 60 * 24 * 31
         ) {
             status in
-            CustomLogger.log("Processing task finished: \(status ?? "nil")")
+            CustomLogger.log("[App] Processing task finished: \(status ?? "nil")")
             task.setTaskCompleted(success: true)
         }
     }

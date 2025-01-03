@@ -24,6 +24,19 @@ struct SettingsView: View {
             }
 
             Section(header: Text("Background refresh")) {
+                Button("HK register observers") {
+                    HealthKitManager.initialize(startObservers: true) {
+                        success in
+                        CustomLogger.log(
+                            "Request authorization and start observers success: \(success)"
+                        )
+                    }
+                }
+                .padding()
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(8)
+
                 Button("Reset background refresh cursors") {
                     IncrementalExporter.resetCursors()
                 }
@@ -75,10 +88,17 @@ struct SettingsView: View {
     }
 
     private func setBgRefreshCursorstText() {
-        let dates = IncrementalExporter.getCursors(
-            sampleTypes:
-                HealthDataExporter.getSampleTypesOfInterest()
-        ).values.map { $0 }
+        guard
+            let dates =
+                (IncrementalExporter.getCursors(
+                    sampleTypes:
+                        ExportConstants.getSampleTypesOfInterest()
+                )?.values.map { $0 })
+        else {
+            bgRefreshCursorstText = "Can't aquire the lock"
+            return
+        }
+
         let setDates = dates.compactMap { $0 }
         let minDate: Date? =
             (dates.isEmpty || dates.contains(nil))

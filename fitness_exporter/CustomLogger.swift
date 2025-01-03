@@ -9,7 +9,7 @@ import Foundation
 
 class CustomLogger {
     // Maximum number of logs to keep
-    private static let maxLogs = 500
+    private static let maxLogs = 1000
 
     // Internal queue for thread safety
     private static let queue = DispatchQueue(

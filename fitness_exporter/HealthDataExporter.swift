@@ -34,21 +34,15 @@ class HealthDataExporter {
 
     static let PAYLOAD_SEND_THRESHOLD = 100 * (1 << 20)
 
-    private var healthStore: HKHealthStore
     private var server: String
     private var serverSession: ServerSession
-    private var serverSessionQuick: ServerSession
     private var sender: String
     private var payloads: [Payload]
     private var payloadsSize = 0
 
-    init(
-        healthStore: HKHealthStore, server: String, sender: String
-    ) {
-        self.healthStore = healthStore
+    init(server: String, sender: String) {
         self.server = server
         self.serverSession = ServerSession(server: server)
-        self.serverSessionQuick = ServerSession(server: server)
         self.sender = sender
 
         self.payloads = []
@@ -59,14 +53,9 @@ class HealthDataExporter {
         sampleType: HKSampleType, from startDate: Date, to endDate: Date,
         completion: @escaping (String?) -> Void
     ) {
-        self.serverSessionQuick.testConnection(timeout: 1) { result in
-            if result != nil {
-                return completion(result)
-            }
-            self.export_(
-                sampleType: sampleType, from: startDate, to: endDate,
-                completion: completion)
-        }
+        self.export_(
+            sampleType: sampleType, from: startDate, to: endDate,
+            completion: completion)
     }
     private func export_(
         sampleType: HKSampleType, from startDate: Date, to endDate: Date,
@@ -74,12 +63,17 @@ class HealthDataExporter {
     ) {
         //        CustomLogger.log("Exporting data to \(server), \(sampleType), from \(startDate) till \(endDate)")
         CustomLogger.log(
-            "Exporting data from \(startDate) till \(endDate), \(sampleType), to \(server), sender \(sender)"
+            "[HDE][Info] Exporting data from \(startDate) till \(endDate), \(sampleType), to \(server), sender \(sender)"
         )
 
         if sender.isEmpty {
             return completion("Sender is empty")
         }
+
+        guard HKHealthStore.isHealthDataAvailable() else {
+            return completion("Health store is not available")
+        }
+        let healthStore = HKHealthStore()
 
         let predicate = HKQuery.predicateForSamples(
             withStart: startDate, end: endDate, options: .strictStartDate)
@@ -94,7 +88,7 @@ class HealthDataExporter {
                 )
             }
             if let samples = samples {
-                self.exportSamples(samples: samples) {
+                self.exportSamples(healthStore: healthStore, samples: samples) {
                     status in
                     if let status = status {
                         completion(status)
@@ -227,7 +221,7 @@ class HealthDataExporter {
     }
 
     private func exportHeartBeatSeries(
-        heartbeatSeries: HKHeartbeatSeriesSample,
+        healthStore: HKHealthStore, heartbeatSeries: HKHeartbeatSeriesSample,
         completion: @escaping (String?) -> Void
     ) {
         var timeSinceSeriesStartArr: [Double] = []
@@ -264,11 +258,12 @@ class HealthDataExporter {
                 fatalError("Too many samples in a HR series")
             }
         }
-        self.healthStore.execute(heartbeatSeriesQuery)
+        healthStore.execute(heartbeatSeriesQuery)
     }
 
     private func exportWorkoutRoute(
-        workoutRoute: HKWorkoutRoute, completion: @escaping (String?) -> Void
+        healthStore: HKHealthStore, workoutRoute: HKWorkoutRoute,
+        completion: @escaping (String?) -> Void
     ) {
         var cLocations: [CCLLocation] = []
 
@@ -302,21 +297,24 @@ class HealthDataExporter {
                 fatalError("Too many samples in workout route")
             }
         }
-        self.healthStore.execute(workoutRouteQuery)
+        healthStore.execute(workoutRouteQuery)
     }
 
     private func exportSample(
-        sample: HKSample, completion: @escaping (String?) -> Void
+        healthStore: HKHealthStore, sample: HKSample,
+        completion: @escaping (String?) -> Void
     ) {
         do {
             if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
                 return self.exportHeartBeatSeries(
-                    heartbeatSeries: heartbeatSeries, completion: completion)
+                    healthStore: healthStore, heartbeatSeries: heartbeatSeries,
+                    completion: completion)
             }
 
             if let workoutRoute = sample as? HKWorkoutRoute {
                 return self.exportWorkoutRoute(
-                    workoutRoute: workoutRoute, completion: completion)
+                    healthStore: healthStore, workoutRoute: workoutRoute,
+                    completion: completion)
             }
 
             if let workout = sample as? HKWorkout {
@@ -364,6 +362,7 @@ class HealthDataExporter {
         label: "com.fitness_exporter.exportQueue")
 
     private func exportSamples(
+        healthStore: HKHealthStore,
         samples: [HKSample], completion: @escaping (String?) -> Void
     ) {
         var index = 0
@@ -376,7 +375,7 @@ class HealthDataExporter {
                 }
 
                 let sample = samples[index]
-                self.exportSample(sample: sample) {
+                self.exportSample(healthStore: healthStore, sample: sample) {
                     status in
                     if let status = status {
                         return completion(status)
@@ -548,7 +547,8 @@ class HealthDataExporter {
                     doubleValue: quantity.doubleValue(for: unit))
             }
         }
-        CustomLogger.log("Can't find a unit for: \(quantity.description)")
+        CustomLogger.log(
+            "[HDE][Error] Can't find a unit for: \(quantity.description)")
         throw ExtractionError.unitParseError(quantity.description)
     }
 
@@ -963,237 +963,103 @@ class HealthDataExporter {
         HKUnit.init(from: "mL/min·kg"),
         HKUnit.init(from: "kcal/hr·kg"),
         HKUnit.appleEffortScore(),
+        HKUnit.millimeterOfMercury(),
         //            HKUnit.siemen(),
         //            HKUnit.volt(),
         //            HKUnit.internationalUnit(),
         //            HKUnit.pascal(),
     ]
+}
 
-    static let QUANTITY_TYPES: [HKQuantityTypeIdentifier] = [
-        .stepCount,
-        .distanceWalkingRunning,
-        .runningGroundContactTime,
-        .runningPower,
-        .runningSpeed,
-        .runningStrideLength,
-        .runningVerticalOscillation,
-        .distanceCycling,
-        .pushCount,
-        .distanceWheelchair,
-        .swimmingStrokeCount,
-        .distanceSwimming,
-        .distanceDownhillSnowSports,
-        .basalEnergyBurned,
-        .activeEnergyBurned,
-        .flightsClimbed,
-        .nikeFuel,
-        .appleExerciseTime,
-        .appleMoveTime,
-        .appleStandTime,
-        .vo2Max,
-        .height,
-        .bodyMass,
-        .bodyMassIndex,
-        .leanBodyMass,
-        .bodyFatPercentage,
-        .waistCircumference,
-        .appleSleepingWristTemperature,
-        .basalBodyTemperature,
-        .environmentalAudioExposure,
-        .headphoneAudioExposure,
-        .heartRate,
-        .restingHeartRate,
-        .walkingHeartRateAverage,
-        .heartRateVariabilitySDNN,
-        .heartRateRecoveryOneMinute,
-        .atrialFibrillationBurden,
-        .oxygenSaturation,
-        .bodyTemperature,
-        .bloodPressureDiastolic,
-        .bloodPressureSystolic,
-        .respiratoryRate,
-        .bloodGlucose,
-        .electrodermalActivity,
-        .forcedExpiratoryVolume1,
-        .forcedVitalCapacity,
-        .inhalerUsage,
-        .insulinDelivery,
-        .numberOfTimesFallen,
-        .peakExpiratoryFlowRate,
-        .peripheralPerfusionIndex,
-        .appleSleepingWristTemperature,
-        .dietaryBiotin,
-        .dietaryCaffeine,
-        .dietaryCalcium,
-        .dietaryCarbohydrates,
-        .dietaryChloride,
-        .dietaryCholesterol,
-        .dietaryChromium,
-        .dietaryCopper,
-        .dietaryEnergyConsumed,
-        .dietaryFatMonounsaturated,
-        .dietaryFatPolyunsaturated,
-        .dietaryFatSaturated,
-        .dietaryFatTotal,
-        .dietaryFiber,
-        .dietaryFolate,
-        .dietaryIodine,
-        .dietaryIron,
-        .dietaryMagnesium,
-        .dietaryManganese,
-        .dietaryMolybdenum,
-        .dietaryNiacin,
-        .dietaryPantothenicAcid,
-        .dietaryPhosphorus,
-        .dietaryPotassium,
-        .dietaryProtein,
-        .dietaryRiboflavin,
-        .dietarySelenium,
-        .dietarySodium,
-        .dietarySugar,
-        .dietaryThiamin,
-        .dietaryVitaminA,
-        .dietaryVitaminB12,
-        .dietaryVitaminB6,
-        .dietaryVitaminC,
-        .dietaryVitaminD,
-        .dietaryVitaminE,
-        .dietaryVitaminK,
-        .dietaryWater,
-        .dietaryZinc,
-        .bloodAlcoholContent,
-        .numberOfAlcoholicBeverages,
-        .appleWalkingSteadiness,
-        .sixMinuteWalkTestDistance,
-        .walkingSpeed,
-        .walkingStepLength,
-        .walkingAsymmetryPercentage,
-        .walkingDoubleSupportPercentage,
-        .stairAscentSpeed,
-        .stairDescentSpeed,
-        .uvExposure,
-        .underwaterDepth,
-        .waterTemperature,
-        .appleSleepingBreathingDisturbances,
-        .crossCountrySkiingSpeed,
-        .cyclingCadence,
-        .cyclingFunctionalThresholdPower,
-        .cyclingPower,
-        .cyclingSpeed,
-        .distanceCrossCountrySkiing,
-        .distancePaddleSports,
-        .distanceRowing,
-        .distanceSkatingSports,
-        .environmentalSoundReduction,
-        .estimatedWorkoutEffortScore,
-        .paddleSportsSpeed,
-        .physicalEffort,
-        .rowingSpeed,
-        .timeInDaylight,
-        .workoutEffortScore,
-    ]
+class HealthKitManager {
+    static func initialize(
+        startObservers: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            CustomLogger.log("[HKM][Error] Health data is not available.")
+            return
+        }
 
-    static let CATEGORY_TYPES: [HKCategoryTypeIdentifier] = [
-        .appleStandHour,
-        .lowCardioFitnessEvent,
-        .menstrualFlow,
-        .intermenstrualBleeding,
-        .infrequentMenstrualCycles,
-        .irregularMenstrualCycles,
-        .persistentIntermenstrualBleeding,
-        .prolongedMenstrualPeriods,
-        .cervicalMucusQuality,
-        .ovulationTestResult,
-        .progesteroneTestResult,
-        .sexualActivity,
-        .contraceptive,
-        .pregnancy,
-        .pregnancyTestResult,
-        .lactation,
-        .environmentalAudioExposureEvent,
-        .headphoneAudioExposureEvent,
-        // .audioExposureEvent,
-        .lowHeartRateEvent,
-        .highHeartRateEvent,
-        .irregularHeartRhythmEvent,
-        .appleWalkingSteadinessEvent,
-        .abdominalCramps,
-        .bloating,
-        .constipation,
-        .diarrhea,
-        .heartburn,
-        .nausea,
-        .vomiting,
-        .appetiteChanges,
-        .chills,
-        .dizziness,
-        .fainting,
-        .fatigue,
-        .fever,
-        .generalizedBodyAche,
-        .hotFlashes,
-        .chestTightnessOrPain,
-        .coughing,
-        .rapidPoundingOrFlutteringHeartbeat,
-        .shortnessOfBreath,
-        .skippedHeartbeat,
-        .wheezing,
-        .lowerBackPain,
-        .headache,
-        .memoryLapse,
-        .moodChanges,
-        .lossOfSmell,
-        .lossOfTaste,
-        .runnyNose,
-        .soreThroat,
-        .sinusCongestion,
-        .breastPain,
-        .pelvicPain,
-        .vaginalDryness,
-        .acne,
-        .drySkin,
-        .hairLoss,
-        .nightSweats,
-        .sleepChanges,
-        .bladderIncontinence,
-        .mindfulSession,
-        .sleepAnalysis,
-        .toothbrushingEvent,
-        .handwashingEvent,
-        .bleedingAfterPregnancy,
-        .bleedingDuringPregnancy,
-        .sleepApneaEvent,
-    ]
+        let healthStore = HKHealthStore()
 
-    static let CLINICAL_TYPES: [HKClinicalTypeIdentifier] = [
-        .allergyRecord,
-        .clinicalNoteRecord,
-        .conditionRecord,
-        .immunizationRecord,
-        .labResultRecord,
-        .medicationRecord,
-        .procedureRecord,
-        .vitalSignRecord,
-        .coverageRecord,
-    ]
+        let sampleTypes = ExportConstants.getSampleTypesOfInterest()
 
-    static func getSampleTypesOfInterest() -> [HKSampleType] {
-        let sampleTypesOfInterest =
-            [
-                HKObjectType.workoutType(),
-                HKSeriesType.heartbeat(),
-                HKSeriesType.workoutRoute(),
-                HKObjectType.stateOfMindType(),
-            ]
-            + HealthDataExporter.QUANTITY_TYPES.map {
-                HKQuantityType.quantityType(forIdentifier: $0)!
+        healthStore.requestAuthorization(toShare: Set(), read: Set(sampleTypes))
+        {
+            okay, error in
+            if let error = error {
+                CustomLogger.log(
+                    "[HKM][Error] Error requesting authorization: \(error)")
+                return completion(false)
             }
-            + HealthDataExporter.CATEGORY_TYPES.map {
-                HKCategoryType.categoryType(forIdentifier: $0)!
+            if !okay {
+                CustomLogger.log("[HKM][Error] Don't have permissions")
+                return completion(false)
             }
-            + HealthDataExporter.CLINICAL_TYPES.map {
-                HKClinicalType.clinicalType(forIdentifier: $0)!
+            if startObservers {
+                for sampleType in sampleTypes {
+                    enableBackgroundDelivery(healthStore, sampleType)
+                }
             }
-        return Array(Set(sampleTypesOfInterest))
+            return completion(true)
+        }
+    }
+
+    private static func enableBackgroundDelivery(
+        _ healthStore: HKHealthStore, _ sampleType: HKSampleType
+    ) {
+        healthStore.enableBackgroundDelivery(
+            for: sampleType, frequency: .immediate
+        ) { success, error in
+            if let error = error {
+                CustomLogger.log(
+                    "[HKM][Error] Error enabling background delivery for \(sampleType): \(error.localizedDescription)"
+                )
+            } else {
+                if !success {
+                    CustomLogger.log(
+                        "[HKM][Error] Error enabling background delivery for \(sampleType)"
+                    )
+                }
+
+                let query = HKObserverQuery(
+                    sampleType: sampleType, predicate: nil
+                ) {
+                    _, completionHandler, error in
+                    if let error = error {
+                        CustomLogger.log(
+                            "[HKM][Error] HKObserver query for \(sampleType) failed: \(error.localizedDescription)"
+                        )
+                        return
+                    }
+
+                    HealthKitManager.observerProcess(sampleType) {
+                        completionHandler()
+                    }
+                }
+
+                healthStore.execute(query)
+            }
+        }
+    }
+
+    private static func observerProcess(
+        _ sampleType: HKSampleType,
+        completion: @escaping () -> Void
+    ) {
+        CustomLogger.log("[HKObserver][Info] \(sampleType) started processing")
+
+        let exporter = IncrementalExporter()
+        exporter.run(
+            sampleTypes: [sampleType],
+            batchSize: 60 * 60 * 24 * 3
+        ) {
+            status in
+            CustomLogger.log(
+                "[HKObserver][\(status == nil ? "Success" : "Error")] \(sampleType) finished processing with status: \(status ?? "OK")"
+            )
+            completion()
+        }
     }
 }

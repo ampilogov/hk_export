@@ -1,25 +1,75 @@
 import Foundation
 import HealthKit
 
+class KeyBasedLock {
+    private var locks: Set<HKSampleType> = []
+    private var total: Bool = false
+    private let lock = NSLock()
+
+    func try_lock() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if total || !locks.isEmpty {
+            return false
+        }
+        total = true
+        return true
+    }
+
+    func try_lock(keys: [HKSampleType]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if total {
+            return false
+        }
+        for key in keys {
+            if locks.contains(key) {
+                return false
+            }
+        }
+        for key in keys {
+            locks.insert(key)
+        }
+        return true
+    }
+
+    func unlock() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        total = false
+    }
+
+    func unlock(keys: [HKSampleType]) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        for key in keys {
+            locks.remove(key)
+        }
+    }
+}
+
 final class IncrementalExporter {
-    private static let LOCK = NSLock()
+    private static let LOCK = KeyBasedLock()
 
     private static let EPS: TimeInterval = 600
     private static let DEFAULT_START_DATE: Date = Calendar.current.date(
         from: DateComponents(year: 2001, month: 1, day: 1))!
-    private static let TIME_TO_FINALIZE: TimeInterval = 2 * 24 * 60 * 60
+    private static let TIME_TO_FINALIZE: TimeInterval = 3 * 24 * 60 * 60
 
     private static let USER_DEFAULTS_KEY_PREFIX =
         "IncrementalExporter_LastExportTime_"
 
-    init() {
-    }
+    init() {}
 
     static func resetCursors() {
-        if IncrementalExporter.LOCK.try() {
+        if IncrementalExporter.LOCK.try_lock() {
             defer { IncrementalExporter.LOCK.unlock() }
 
-            CustomLogger.log("Resetting cursors")
+            CustomLogger.log("[IE][Warning] Resetting cursors")
 
             let keys = UserDefaults.standard.dictionaryRepresentation().keys
 
@@ -31,14 +81,14 @@ final class IncrementalExporter {
             UserDefaults.standard.synchronize()
 
         } else {
-            CustomLogger.log("Can't aquire lock for reset cursors")
+            CustomLogger.log("[IE][Error] Can't aquire lock for reset cursors")
         }
     }
 
     static func getCursors(
         sampleTypes: [HKSampleType]
-    ) -> [HKSampleType: Date?] {
-        if IncrementalExporter.LOCK.try() {
+    ) -> [HKSampleType: Date?]? {
+        if IncrementalExporter.LOCK.try_lock() {
             defer { IncrementalExporter.LOCK.unlock() }
 
             return Dictionary(
@@ -46,8 +96,8 @@ final class IncrementalExporter {
                     ($0, IncrementalExporter.getLastExportTime($0))
                 })
         } else {
-            CustomLogger.log("Can't aquire lock for get cursors")
-            return [:]
+            CustomLogger.log("[IE][Error] Can't aquire lock for get cursors")
+            return nil
         }
     }
 
@@ -55,20 +105,28 @@ final class IncrementalExporter {
         sampleTypes: [HKSampleType], batchSize: TimeInterval,
         completion: @escaping (String?) -> Void
     ) {
-        if IncrementalExporter.LOCK.try() {
-            CustomLogger.log("Run locked")
+        let sampleTypesDescr =
+            sampleTypes.count > 3
+            ? "\(sampleTypes[0..<3])".replacingOccurrences(
+                of: "]", with: "...]") : "\(sampleTypes)"
+        if IncrementalExporter.LOCK.try_lock(keys: sampleTypes) {
+            CustomLogger.log(
+                "[IE][Info] \(sampleTypesDescr), aquired the lock and starting export"
+            )
             self.runUnlocked(
                 sampleTypes: sampleTypes,
                 batchSize: batchSize
             ) {
                 result in
-                IncrementalExporter.LOCK.unlock()
-                CustomLogger.log("Run unlocked")
+                IncrementalExporter.LOCK.unlock(keys: sampleTypes)
+                CustomLogger.log(
+                    "[IE][\(result == nil ? "Success" : "Error")] \(sampleTypesDescr), released the lock and finished export with status: \(result ?? "OK")"
+                )
                 return completion(result)
             }
         } else {
-            CustomLogger.log("Can't aquire lock for run")
-            return completion("Can't aquire lock for run")
+            return completion(
+                "[IE][Error] Can't aquire lock for \(sampleTypesDescr)")
         }
     }
 
@@ -83,7 +141,6 @@ final class IncrementalExporter {
             }
 
             let exporter = HealthDataExporter(
-                healthStore: HKHealthStore(),
                 server: serverURL!,
                 sender: UserDefaults.standard.string(
                     forKey: UserDefaultsKeys.SENDER) ?? ""
@@ -99,7 +156,7 @@ final class IncrementalExporter {
         sampleTypes: [HKSampleType], batchSize: TimeInterval,
         completion: @escaping (String?) -> Void
     ) {
-        CustomLogger.log("Running incremental export")
+        // CustomLogger.log("Running incremental export")
 
         let queue = DispatchQueue(
             label: "com.fitness_exporter.incrementalQueue")
@@ -109,9 +166,9 @@ final class IncrementalExporter {
         func processNext() {
             queue.async {
                 if index == sampleTypes.count {
-                    CustomLogger.log(
-                        "Finished running incremental export, success \(index)/\(sampleTypes.count)"
-                    )
+                    //                    CustomLogger.log(
+                    //                        "[IE] Finished running incremental export, success \(index)/\(sampleTypes.count)"
+                    //                    )
                     return completion(nil)
                 }
 
@@ -121,13 +178,13 @@ final class IncrementalExporter {
                         return completion(status)
                     }
                     index += 1
-                    processNext()
+                    return processNext()
                 }
 
             }
         }
 
-        processNext()
+        return processNext()
     }
 
     private func exportSampleType(
@@ -135,8 +192,6 @@ final class IncrementalExporter {
         _ sampleType: HKSampleType, _ batchSize: TimeInterval,
         completion: @escaping (String?) -> Void
     ) {
-        CustomLogger.log("Running incremental export for \(sampleType)")
-
         let queue = DispatchQueue(
             label: "com.fitness_exporter.incrementalSampleQueue")
 
@@ -144,40 +199,39 @@ final class IncrementalExporter {
             IncrementalExporter.getLastExportTime(sampleType)
             ?? IncrementalExporter.DEFAULT_START_DATE
         let now = Date()
-        CustomLogger.log("Last export time: \(lastExportTime), now: \(now)")
+        CustomLogger.log(
+            "[IE][Info] \(sampleType), last export time: \(lastExportTime), now: \(now)"
+        )
 
         func processNext() {
             queue.async {
                 if lastExportTime >= now {
-                    CustomLogger.log(
-                        "Finished running incremental export for \(sampleType), success"
-                    )
                     return completion(nil)
                 }
 
                 let from = lastExportTime - IncrementalExporter.EPS
                 let to = lastExportTime + batchSize + IncrementalExporter.EPS
-                CustomLogger.log(
-                    "Running incremental export for \(sampleType) from \(from) to \(to)"
-                )
                 exporter.export(sampleType: sampleType, from: from, to: to) {
                     status in
                     if let status = status {
                         return completion(status)
                     }
                     lastExportTime += batchSize
+                    let newLastExportTime = min(
+                        lastExportTime,
+                        now - IncrementalExporter.TIME_TO_FINALIZE)
+                    CustomLogger.log(
+                        "[IE][Success] \(sampleType), updating last export time: \(newLastExportTime)"
+                    )
                     IncrementalExporter.setLastExportTime(
-                        sampleType,
-                        min(
-                            lastExportTime,
-                            now - IncrementalExporter.TIME_TO_FINALIZE))
-                    processNext()
+                        sampleType, newLastExportTime)
+                    return processNext()
                 }
 
             }
         }
 
-        processNext()
+        return processNext()
     }
 
     private static func getLastExportTime(_ sampleType: HKSampleType) -> Date? {
@@ -211,13 +265,13 @@ final class IncrementalExporter {
         serverSessionQuick.testConnection(timeout: 1) { errMsg in
             if errMsg != nil {
                 CustomLogger.log(
-                    "IncrementalExporter: failed to connect to server: \(errMsg!)"
+                    "[IE][Error] Failed to connect to server: \(errMsg!)"
                 )
                 if UserDefaults.standard.bool(
                     forKey: UserDefaultsKeys.AUTO_SERVER_DISCOVERY_ENABLED)
                 {
                     CustomLogger.log(
-                        "IncrementalExporter: starting auto server discovery..."
+                        "[IE][Info]: Starting auto server discovery..."
                     )
                     AutoServerDiscovery.run {
                         url in

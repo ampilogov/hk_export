@@ -330,24 +330,24 @@ final class AutoServerDiscovery {
                 UserDefaults.standard.string(
                     forKey: UserDefaultsKeys.SERVER_URL) ?? ""
             CustomLogger.log(
-                "Starting auto server discovery, from \(server)")
+                "[ASD][Info] Starting auto server discovery, from \(server)")
 
             let discovery = AutoServerDiscovery(oldServerURL: server)
             discovery.discoverNewServer { errMsg, url in
                 if errMsg == nil {
-                    CustomLogger.log("Found a new server: \(url!)")
+                    CustomLogger.log("[ASD][Success] Found a new server: \(url!)")
                     UserDefaults.standard.set(
                         url!.absoluteString, forKey: UserDefaultsKeys.SERVER_URL
                     )
                     completion(url)
                 } else {
                     CustomLogger.log(
-                        "Couldn't find a new server: \(errMsg!)")
+                        "[ASD][Error] Couldn't find a new server: \(errMsg!)")
                     completion(nil)
                 }
             }
         } else {
-            CustomLogger.log("Can't aquire auto discovery lock")
+            CustomLogger.log("[ASD][Error] Can't aquire auto discovery lock")
         }
     }
 
