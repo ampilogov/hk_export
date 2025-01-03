@@ -2,58 +2,137 @@ import Foundation
 import HealthKit
 
 class KeyBasedLock {
-    private var locks: Set<HKSampleType> = []
-    private var total: Bool = false
-    private let lock = NSLock()
-
-    func try_lock() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if total || !locks.isEmpty {
-            return false
-        }
-        total = true
-        return true
+    private protocol LockType {
+        func canLock(lock: KeyBasedLock) -> Bool
+        func setTTL(lock: KeyBasedLock, date: Date)
+        func removeLocks(lock: KeyBasedLock)
     }
 
-    func try_lock(keys: [HKSampleType]) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if total {
-            return false
-        }
-        for key in keys {
-            if locks.contains(key) {
+    private class TotalLock: LockType {
+        func canLock(lock: KeyBasedLock) -> Bool {
+            if lock.total != nil || !lock.locks.isEmpty {
                 return false
             }
+            return true
         }
-        for key in keys {
-            locks.insert(key)
+
+        func setTTL(lock: KeyBasedLock, date: Date) {
+            lock.total = date
         }
-        return true
+
+        func removeLocks(lock: KeyBasedLock) {
+            lock.total = nil
+        }
     }
 
-    func unlock() {
+    private class KeyLock: LockType {
+        private let keys: [HKSampleType]
+
+        init(keys: [HKSampleType]) {
+            self.keys = keys
+        }
+
+        internal func canLock(lock: KeyBasedLock) -> Bool {
+            if lock.total != nil {
+                return false
+            }
+            for key in keys {
+                if lock.locks.keys.contains(key) {
+                    return false
+                }
+            }
+            return true
+        }
+
+        internal func setTTL(lock: KeyBasedLock, date: Date) {
+            for key in keys {
+                lock.locks[key] = date
+            }
+        }
+
+        internal func removeLocks(lock: KeyBasedLock) {
+            for key in keys {
+                lock.locks.removeValue(forKey: key)
+            }
+        }
+    }
+
+    protocol LockToken {
+        func extendTTL()
+        func unlock()
+    }
+
+    private class LockToken_: LockToken {
+        private let owner: KeyBasedLock
+        private let type: LockType
+
+        init(owner: KeyBasedLock, type: LockType) {
+            self.owner = owner
+            self.type = type
+        }
+
+        func extendTTL() {
+            owner.lock.lock()
+            defer { owner.lock.unlock() }
+
+            type.setTTL(lock: owner, date: Date())
+        }
+
+        func unlock() {
+            owner.lock.lock()
+            defer { owner.lock.unlock() }
+
+            type.removeLocks(lock: owner)
+        }
+    }
+
+    private var locks: [HKSampleType: Date] = [:]
+    private var total: Date? = nil
+    private let lock = NSLock()
+    private let ttl: TimeInterval
+
+    init(ttl: TimeInterval) {
+        self.ttl = ttl
+    }
+
+    func tryLock() -> LockToken? {
+        return tryLock_(TotalLock())
+    }
+
+    func tryLock(keys: [HKSampleType]) -> LockToken? {
+        return tryLock_(KeyLock(keys: keys))
+    }
+
+    private func tryLock_(_ type: LockType) -> LockToken? {
         lock.lock()
         defer { lock.unlock() }
 
-        total = false
+        let now = Date()
+
+        cleanStaleLocks(now)
+
+        if type.canLock(lock: self) {
+            type.setTTL(lock: self, date: now)
+            return LockToken_(owner: self, type: type)
+        } else {
+            return nil
+        }
     }
 
-    func unlock(keys: [HKSampleType]) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        for key in keys {
-            locks.remove(key)
+    private func cleanStaleLocks(_ now: Date) {
+        if let total_ = total, total_ + ttl < now {
+            total = nil
+        }
+        for (key, value) in Array(locks) {
+            if value + ttl < now {
+                locks.removeValue(forKey: key)
+            }
         }
     }
 }
 
 final class IncrementalExporter {
-    private static let LOCK = KeyBasedLock()
+    private static let LOCK = KeyBasedLock(ttl: 60)
 
     private static let EPS: TimeInterval = 600
     private static let DEFAULT_START_DATE: Date = Calendar.current.date(
@@ -66,8 +145,8 @@ final class IncrementalExporter {
     init() {}
 
     static func resetCursors() {
-        if IncrementalExporter.LOCK.try_lock() {
-            defer { IncrementalExporter.LOCK.unlock() }
+        if let token = IncrementalExporter.LOCK.tryLock() {
+            defer { token.unlock() }
 
             CustomLogger.log("[IE][Warning] Resetting cursors")
 
@@ -88,8 +167,8 @@ final class IncrementalExporter {
     static func getCursors(
         sampleTypes: [HKSampleType]
     ) -> [HKSampleType: Date?]? {
-        if IncrementalExporter.LOCK.try_lock() {
-            defer { IncrementalExporter.LOCK.unlock() }
+        if let token = IncrementalExporter.LOCK.tryLock() {
+            defer { token.unlock() }
 
             return Dictionary(
                 uniqueKeysWithValues: sampleTypes.map {
@@ -109,16 +188,17 @@ final class IncrementalExporter {
             sampleTypes.count > 3
             ? "\(sampleTypes[0..<3])".replacingOccurrences(
                 of: "]", with: "...]") : "\(sampleTypes)"
-        if IncrementalExporter.LOCK.try_lock(keys: sampleTypes) {
+        if let token = IncrementalExporter.LOCK.tryLock(keys: sampleTypes) {
             CustomLogger.log(
                 "[IE][Info] \(sampleTypesDescr), aquired the lock and starting export"
             )
             self.runUnlocked(
                 sampleTypes: sampleTypes,
-                batchSize: batchSize
+                batchSize: batchSize,
+                token: token
             ) {
                 result in
-                IncrementalExporter.LOCK.unlock(keys: sampleTypes)
+                token.unlock()
                 CustomLogger.log(
                     "[IE][\(result == nil ? "Success" : "Error")] \(sampleTypesDescr), released the lock and finished export with status: \(result ?? "OK")"
                 )
@@ -132,6 +212,7 @@ final class IncrementalExporter {
 
     private func runUnlocked(
         sampleTypes: [HKSampleType], batchSize: TimeInterval,
+        token: KeyBasedLock.LockToken,
         completion: @escaping (String?) -> Void
     ) {
         IncrementalExporter.getServerURL {
@@ -147,13 +228,14 @@ final class IncrementalExporter {
             )
             self.export(
                 exporter: exporter, sampleTypes: sampleTypes,
-                batchSize: batchSize, completion: completion)
+                batchSize: batchSize, token: token, completion: completion)
         }
     }
 
     private func export(
         exporter: HealthDataExporter,
         sampleTypes: [HKSampleType], batchSize: TimeInterval,
+        token: KeyBasedLock.LockToken,
         completion: @escaping (String?) -> Void
     ) {
         // CustomLogger.log("Running incremental export")
@@ -172,7 +254,9 @@ final class IncrementalExporter {
                     return completion(nil)
                 }
 
-                self.exportSampleType(exporter, sampleTypes[index], batchSize) {
+                self.exportSampleType(
+                    exporter, sampleTypes[index], batchSize, token
+                ) {
                     status in
                     if let status = status {
                         return completion(status)
@@ -190,6 +274,7 @@ final class IncrementalExporter {
     private func exportSampleType(
         _ exporter: HealthDataExporter,
         _ sampleType: HKSampleType, _ batchSize: TimeInterval,
+        _ token: KeyBasedLock.LockToken,
         completion: @escaping (String?) -> Void
     ) {
         let queue = DispatchQueue(
@@ -216,6 +301,7 @@ final class IncrementalExporter {
                     if let status = status {
                         return completion(status)
                     }
+                    token.extendTTL()
                     lastExportTime += batchSize
                     let newLastExportTime = min(
                         lastExportTime,
