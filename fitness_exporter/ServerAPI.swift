@@ -168,10 +168,26 @@ class CustomSessionDelegate: NSObject, URLSessionDelegate {
 }
 
 class ServerSession {
-    public var server: String
+    private var server: String
     private var session: URLSession
 
-    init(server: String) {
+    private static let LOCK = NSLock()
+    private static var SESSIONS: [String: ServerSession] = [:]
+
+    static func getSession(server: String) -> ServerSession {
+        LOCK.lock()
+        defer { LOCK.unlock() }
+
+        if let session = SESSIONS[server] {
+            return session
+        }
+
+        let session = ServerSession(server: server)
+        SESSIONS[server] = session
+        return session
+    }
+
+    private init(server: String) {
         self.server = server
 
         let configuration = URLSessionConfiguration.default
@@ -185,13 +201,15 @@ class ServerSession {
     }
 
     func sendPayloadsJson(
-        payloads: [[String: Any]], timeout: TimeInterval = 15,
+        payloads: [[String: Any]], timeout: TimeInterval? = 20,
         completion: @escaping (String?) -> Void
     ) {
         if let url = URL(string: server) {
             var request = URLRequest(url: url.appendingPathComponent("batch"))
             request.httpMethod = "POST"
-            request.timeoutInterval = timeout
+            if let timeout = timeout {
+                request.timeoutInterval = timeout
+            }
             request.setValue(
                 "application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
@@ -236,13 +254,15 @@ class ServerSession {
     }
 
     func sendPayloadsPList(
-        payloads: [[String: Any]], timeout: TimeInterval = 15,
+        payloads: [[String: Any]], timeout: TimeInterval? = 20,
         completion: @escaping (String?) -> Void
     ) {
         if let url = URL(string: server) {
             var request = URLRequest(url: url.appendingPathComponent("batch"))
             request.httpMethod = "POST"
-            request.timeoutInterval = timeout
+            if let timeout = timeout {
+                request.timeoutInterval = timeout
+            }
             request.setValue(
                 "application/x-plist", forHTTPHeaderField: "Content-Type")
             request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
@@ -293,13 +313,15 @@ class ServerSession {
     //    }
 
     func testConnection(
-        timeout: TimeInterval,
+        timeout: TimeInterval?,
         completion: @escaping (String?) -> Void
     ) {
         if let url = URL(string: server) {
             var request = URLRequest(url: url.appendingPathComponent("status"))
             request.httpMethod = "GET"
-            request.timeoutInterval = timeout
+            if let timeout = timeout {
+                request.timeoutInterval = timeout
+            }
             let task = self.session.dataTask(with: request) {
                 data, response, error in
                 if let error = error {
@@ -430,8 +452,8 @@ final class AutoServerDiscovery {
 
     private func probe(url: URL, completion: @escaping (Bool) -> Void) {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout
+        // config.timeoutIntervalForRequest = timeout
+        // config.timeoutIntervalForResource = timeout
 
         let session = URLSession(
             configuration: config, delegate: sessionDelegate, delegateQueue: nil

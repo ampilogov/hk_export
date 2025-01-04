@@ -346,7 +346,7 @@ final class IncrementalExporter {
         let server =
             UserDefaults.standard.string(forKey: UserDefaultsKeys.SERVER_URL)
             ?? ""
-        let serverSessionQuick = ServerSession(server: server)
+        let serverSessionQuick = ServerSession.getSession(server: server)
 
         serverSessionQuick.testConnection(timeout: 1) { errMsg in
             if errMsg != nil {

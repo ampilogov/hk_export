@@ -43,7 +43,7 @@ class HealthDataExporter {
 
     init(server: String, sender: String) {
         self.server = server
-        self.serverSession = ServerSession(server: server)
+        self.serverSession = ServerSession.getSession(server: server)
         self.sender = sender
 
         self.payloads = []
