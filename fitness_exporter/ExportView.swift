@@ -4,31 +4,26 @@ import SwiftUI
 struct DateRangeExporterView: View {
     private static let batchSizeDays = 30
 
-    struct ExportTask {
-        var sampleType: HKSampleType
-        var start: Date
-        var end: Date
-        var server: String
-        var sender: String
-    }
+    typealias ProcessingTask = (@escaping (String?) -> Void) -> Void
 
-    @State private var exportTasks: [ExportTask] = []
-    @State private var nextExportTaskIndex = 0
+    @State private var processingTasks: [ProcessingTask] = []
+    @State private var nextProcessingTaskIndex = 0
 
     @State private var startDate: Date =
         Calendar.current.date(byAdding: .day, value: -31, to: Date()) ?? Date()
     @State private var endDate: Date = Date()
+    @State private var cursorsText: String = ""
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var progress: Double = 0
     @AppStorage(UserDefaultsKeys.SERVER_URL) private var server: String =
         ""
     @AppStorage(UserDefaultsKeys.SENDER) private var sender: String = ""
-    @Binding var isExporting: Bool
+    @Binding var isProcessing: Bool
 
     var body: some View {
         Form {
-            Section(header: Text("Select Date Range")) {
+            Section(header: Text("Manual export")) {
                 DatePicker(
                     "Start Date:", selection: $startDate,
                     displayedComponents: .date
@@ -66,17 +61,15 @@ struct DateRangeExporterView: View {
                     }
                     .buttonStyle(BorderlessButtonStyle())
                 }
-            }
 
-            Section {
                 Button("Export Data") {
                     exportDataInRange(
                         from: startDate, to: endDate, server: server,
                         sender: sender)
                 }
-                .disabled(isExporting)  // Disable button while exporting
+                .disabled(isProcessing)
                 .padding()
-                .background(isExporting ? Color.gray : Color.blue)
+                .background(isProcessing ? Color.gray : Color.blue)
                 .foregroundColor(.white)
                 .cornerRadius(8)
                 .alert(isPresented: $showAlert) {
@@ -84,11 +77,39 @@ struct DateRangeExporterView: View {
                         title: Text("Error"),
                         message: Text(alertMessage),
                         dismissButton: .default(Text("OK")) {
-                            continueExport()
+                            continueProcessing()
+                        }
+                    )
+                }
+            }
+
+            Section(header: Text("Auto export")) {
+                Button("Run Auto Export") {
+                    cursorsText = ""
+                    runIncrementalExporterAndHKObserver(
+                        server: server, sender: sender)
+                }
+                .disabled(isProcessing)
+                .padding()
+                .background(isProcessing ? Color.gray : Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(8)
+                .alert(isPresented: $showAlert) {
+                    Alert(
+                        title: Text("Error"),
+                        message: Text(alertMessage),
+                        dismissButton: .default(Text("OK")) {
+                            continueProcessing()
                         }
                     )
                 }
 
+                if !cursorsText.isEmpty {
+                    Text(cursorsText)
+                }
+            }
+
+            Section {
                 ProgressView(value: progress, total: 1.0)
                     .progressViewStyle(LinearProgressViewStyle())
                     .padding()
@@ -108,68 +129,69 @@ struct DateRangeExporterView: View {
     func exportDataInRange(
         from start: Date, to end: Date, server: String, sender: String
     ) {
-        //        let exporter = IncrementalExporter()
-        //        exporter.runExport(
-        //            sampleTypes: HealthDataExporter.getSampleTypesOfInterest(),
-        //            batchSize: 60 * 60 * 24 * 31
-        //        ) {
-        //            status in
-        //            CustomLogger.log("Processing task finished: \(status ?? "nil")")
-        //        }
-        //        return
-        //
-        let healthStore = HKHealthStore()
-        // TODO: utilize this.
-        healthStore.enableBackgroundDelivery(
-            for: HKQuantityType.quantityType(forIdentifier: .stepCount)!,
-            frequency: .immediate
-        ) { success, error in
+        HealthKitManager.initialize(startObservers: false) {
+            success in
             if !success {
-                CustomLogger.log(
-                    "Failed to enable background delivery: \(String(describing: error))"
-                )
-                abort()
-            }
-        }
-        healthStore.requestAuthorization(
-            toShare: Set([]),
-            read: Set(ExportConstants.getSampleTypesOfInterest())
-        ) { (okay, error) in
-            if let error = error {
-                CustomLogger.log("Error requesting authorization: \(error)")
-                return
-            }
-            if !okay {
-                CustomLogger.log("Don't have permissions")
+                alertMessage = "HK Store initialization failed, see logs"
+                showAlert = true
                 return
             }
 
-            //            let sampleTypesOfInterest_ = [
-            //                HKSampleType.quantityType(forIdentifier: HKQuantityTypeIdentifier.distanceWalkingRunning)!,
-            //            ]
-            //            let sampleTypesOfInterest_ = [
-            //                HKSeriesType.workoutRoute(),
-            //                HKSeriesType.heartbeat(),
-            //                HKObjectType.categoryType(forIdentifier: .mindfulSession)!,
-            //            ]
-            DispatchQueue.main.async {
-                self.isExporting = true
-                UIApplication.shared.isIdleTimerDisabled = true
-            }
-
-            exportDataInRangeForTypes(
-                sampleTypes:
-                    ExportConstants.getSampleTypesOfInterest(),
-                from: start, to: end, server: server, sender: sender)
+            startProcessing(
+                tasks:
+                    getExportDataInRangeTasks(
+                        sampleTypes:
+                            ExportConstants.getSampleTypesOfInterest(),
+                        from: start, to: end, server: server, sender: sender))
         }
     }
 
-    func exportDataInRangeForTypes(
+    func runIncrementalExporterAndHKObserver(server: String, sender: String) {
+        HealthKitManager.initialize(startObservers: false) {
+            success in
+            if !success {
+                alertMessage = "HK Store initialization failed, see logs"
+                showAlert = true
+                return
+            }
+
+            startProcessing(
+                tasks:
+                    ExportConstants.getSampleTypesOfInterest().map {
+                        { [sampleType = $0] completion in
+                            IncrementalExporter().run(
+                                sampleTypes: [sampleType],
+                                batchSize: 60 * 60 * 24 * 31,
+                                completion: completion
+                            )
+                        }
+                    }
+                    + [
+                        {
+                            completion in
+                            DispatchQueue.main.sync {
+                                cursorsText =
+                                    SettingsView.getBgRefreshCursorsText()
+                            }
+                            HealthKitManager.initialize(startObservers: true) {
+                                success in
+                                return completion(
+                                    success
+                                        ? nil
+                                        : "HK Store initialization failed, see logs"
+                                )
+                            }
+                        }
+                    ]
+            )
+        }
+    }
+
+    func getExportDataInRangeTasks(
         sampleTypes: [HKSampleType],
         from start: Date, to end: Date, server: String, sender: String
-    ) {
-        exportTasks = []
-        nextExportTaskIndex = 0
+    ) -> [ProcessingTask] {
+        var tasks: [ProcessingTask] = []
 
         for sampleType in sampleTypes {
             var currentDate = start
@@ -179,56 +201,62 @@ struct DateRangeExporterView: View {
                         byAdding: .day,
                         value: DateRangeExporterView.batchSizeDays,
                         to: currentDate) ?? currentDate
-                exportTasks.append(
-                    ExportTask(
-                        sampleType: sampleType,
-                        start: currentDate,
-                        end: min(nextDate, end),
-                        server: server,
-                        sender: sender)
+                tasks.append(
+                    {
+                        [
+                            server, sender, sampleType, from = currentDate,
+                            to = min(nextDate, end)
+                        ]
+                        completion in
+                        HealthDataExporter(server: server, sender: sender)
+                            .export(
+                                sampleType: sampleType, from: from, to: to,
+                                completion: completion)
+                    }
                 )
                 currentDate = nextDate
             }
         }
 
-        continueExport()
+        return tasks
     }
 
-    func continueExport() {
-        if nextExportTaskIndex == exportTasks.count {
-            DispatchQueue.main.async {
-                self.progress = 1.0
-                self.isExporting = false
-                UIApplication.shared.isIdleTimerDisabled = false
-            }
-            return
-        }
-
-        let done = Double(nextExportTaskIndex) / Double(exportTasks.count)
-        let task = exportTasks[nextExportTaskIndex]
-
-        DispatchQueue.main.async {
-            self.isExporting = true
-            self.nextExportTaskIndex += 1
+    func startProcessing(tasks: [ProcessingTask]) {
+        DispatchQueue.main.sync {
+            self.nextProcessingTaskIndex = 0
+            self.processingTasks = tasks
+            self.isProcessing = true
             UIApplication.shared.isIdleTimerDisabled = true
         }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            DispatchQueue.main.async {  // Update UI on main thread
-                self.progress = done
+        continueProcessing()
+    }
+
+    func continueProcessing() {
+        DispatchQueue.main.async {
+            if nextProcessingTaskIndex == processingTasks.count {
+                self.progress = 1.0
+                self.isProcessing = false
+                UIApplication.shared.isIdleTimerDisabled = false
+                return
             }
 
-            let exporter = HealthDataExporter(
-                server: server, sender: task.sender)
-            exporter.export(
-                sampleType: task.sampleType, from: task.start, to: task.end
-            ) { error in
-                //                    CustomLogger.log("Export callback: \(error ?? "Success!")")
-                alertMessage = error ?? "Success!"
-                let success = error == nil
-                showAlert = !success
-                if success {
-                    continueExport()
+            let done =
+                Double(nextProcessingTaskIndex) / Double(processingTasks.count)
+            let task = processingTasks[nextProcessingTaskIndex]
+
+            self.isProcessing = true
+            self.nextProcessingTaskIndex += 1
+            self.progress = done
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                task { error in
+                    alertMessage = error ?? "Success!"
+                    let success = error == nil
+                    showAlert = !success
+                    if success {
+                        continueProcessing()
+                    }
                 }
             }
         }

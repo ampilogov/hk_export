@@ -357,11 +357,15 @@ final class IncrementalExporter {
                     forKey: UserDefaultsKeys.AUTO_SERVER_DISCOVERY_ENABLED)
                 {
                     CustomLogger.log(
-                        "[IE][Info]: Starting auto server discovery..."
+                        "[IE][Info] Starting auto server discovery..."
                     )
                     AutoServerDiscovery.run {
                         url in
-                        return completion(nil, url!.absoluteString)
+                        if let url = url {
+                            return completion(nil, url.absoluteString)
+                        } else {
+                            return completion("Could not find server", nil)
+                        }
                     }
                 } else {
                     return completion(errMsg, nil)

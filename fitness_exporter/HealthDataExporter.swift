@@ -28,6 +28,7 @@ class Payload {
         return key
     }
 }
+
 class HealthDataExporter {
     static let VERSION = "v003"
     static let SENDER_EXTRA_KEY = "mnluucdsobcbkiae4a98"
@@ -57,6 +58,7 @@ class HealthDataExporter {
             sampleType: sampleType, from: startDate, to: endDate,
             completion: completion)
     }
+
     private func export_(
         sampleType: HKSampleType, from startDate: Date, to endDate: Date,
         completion: @escaping (String?) -> Void

@@ -325,7 +325,6 @@ final class AutoServerDiscovery {
     private static let RUN_LOCK = NSLock()
     static func run(completion: @escaping (URL?) -> Void) {
         if AutoServerDiscovery.RUN_LOCK.try() {
-            defer { AutoServerDiscovery.RUN_LOCK.unlock() }
             let server =
                 UserDefaults.standard.string(
                     forKey: UserDefaultsKeys.SERVER_URL) ?? ""
@@ -334,8 +333,10 @@ final class AutoServerDiscovery {
 
             let discovery = AutoServerDiscovery(oldServerURL: server)
             discovery.discoverNewServer { errMsg, url in
+                defer { AutoServerDiscovery.RUN_LOCK.unlock() }
                 if errMsg == nil {
-                    CustomLogger.log("[ASD][Success] Found a new server: \(url!)")
+                    CustomLogger.log(
+                        "[ASD][Success] Found a new server: \(url!)")
                     UserDefaults.standard.set(
                         url!.absoluteString, forKey: UserDefaultsKeys.SERVER_URL
                     )
@@ -422,7 +423,8 @@ final class AutoServerDiscovery {
         }
 
         group.notify(queue: .main) {
-            return completion(nil, discoveredServer)
+            return completion(
+                discoveredServer == nil ? "Not found" : nil, discoveredServer)
         }
     }
 

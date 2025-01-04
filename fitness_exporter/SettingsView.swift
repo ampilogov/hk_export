@@ -8,7 +8,7 @@ struct SettingsView: View {
     @AppStorage(UserDefaultsKeys.AUTO_SERVER_DISCOVERY_ENABLED) private
         var autoServerDiscovery: Bool =
             false
-    @State private var bgRefreshCursorstText: String = ""
+    @State private var bgRefreshCursorsText: String = ""
 
     var body: some View {
         Form {
@@ -46,16 +46,16 @@ struct SettingsView: View {
                 .cornerRadius(8)
 
                 Button("Check background refresh cursors") {
-                    setBgRefreshCursorstText()
+                    bgRefreshCursorsText =
+                        SettingsView.getBgRefreshCursorsText()
                 }
                 .padding()
                 .background(Color.blue)
                 .foregroundColor(.white)
                 .cornerRadius(8)
 
-                if !bgRefreshCursorstText.isEmpty {
-                    Text(bgRefreshCursorstText)
-                    //                        .padding()
+                if !bgRefreshCursorsText.isEmpty {
+                    Text(bgRefreshCursorsText)
                 }
 
                 Toggle(isOn: $autoServerDiscovery) {
@@ -87,7 +87,7 @@ struct SettingsView: View {
         }
     }
 
-    private func setBgRefreshCursorstText() {
+    public static func getBgRefreshCursorsText() -> String {
         guard
             let dates =
                 (IncrementalExporter.getCursors(
@@ -95,8 +95,7 @@ struct SettingsView: View {
                         ExportConstants.getSampleTypesOfInterest()
                 )?.values.map { $0 })
         else {
-            bgRefreshCursorstText = "Can't aquire the lock"
-            return
+            return "Can't aquire the lock"
         }
 
         let setDates = dates.compactMap { $0 }
@@ -109,8 +108,7 @@ struct SettingsView: View {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         formatter.timeZone = TimeZone.current
 
-        bgRefreshCursorstText =
-            "Background refresh cursors: ["
+        return "Background refresh cursors: ["
             + (minDate == nil ? "nil" : formatter.string(from: minDate!)) + ".."
             + (maxDate == nil ? "nil" : formatter.string(from: maxDate!)) + "]"
     }

@@ -5,9 +5,8 @@
 //  Created by Artem Zinchenko on 3/23/24.
 //
 
-import UIKit
-
 import SwiftUI
+import UIKit
 
 @main
 struct fitness_exporterApp: App {
@@ -23,11 +22,11 @@ struct fitness_exporterApp: App {
 }
 
 struct ContentView: View {
-    @State private var isExporting: Bool = false
+    @State private var isProcessing: Bool = false
 
     var body: some View {
         TabView {
-            DateRangeExporterView(isExporting: $isExporting)
+            DateRangeExporterView(isProcessing: $isProcessing)
                 .tabItem {
                     Label("Export", systemImage: "house")
                 }
@@ -42,7 +41,7 @@ struct ContentView: View {
                     Label("Settings", systemImage: "gear")
                 }
         }
-        .disabled(isExporting)
-        .blur(radius: isExporting ? 1.0 : 0)
+        .disabled(isProcessing)
+        .blur(radius: isProcessing ? 1.0 : 0)
     }
 }
