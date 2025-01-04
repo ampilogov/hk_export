@@ -1,15 +1,10 @@
-//
-//  LogView.swift
-//  fitness_exporter
-//
-//  Created by Artem Zinchenko on 12/22/24.
-//
-
 import SwiftUI
 
 struct LogView: View {
     @State private var displayedText: String = ""
     @State private var lastLoaded: Date? = nil
+    @State private var currentPage: Int = 1
+    private let logsPerPage: Int = 50  // Number of logs per page
 
     var body: some View {
         VStack(spacing: 20) {
@@ -30,8 +25,42 @@ struct LogView: View {
                     .cornerRadius(8)
             }
 
+            // Pagination controls
+            HStack {
+                Button(action: {
+                    if currentPage > 1 {
+                        currentPage -= 1
+                        loadData()
+                    }
+                }) {
+                    Text("Previous")
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(currentPage > 1 ? Color.blue : Color.gray)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                }
+                .disabled(currentPage <= 1)
+
+                Button(action: {
+                    if hasNextPage() {
+                        currentPage += 1
+                        loadData()
+                    }
+                }) {
+                    Text("Next")
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(hasNextPage() ? Color.blue : Color.gray)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                }
+                .disabled(!hasNextPage())
+            }
+
             // Refresh button
             Button(action: {
+                currentPage = 1
                 loadData()
             }) {
                 Text("Refresh")
@@ -51,16 +80,24 @@ struct LogView: View {
     // Function to fetch data and update the state
     private func loadData() {
         // Simulate fetching data from a function call
-        displayedText = fetchText()
+        let logs = fetchLogsForPage(page: currentPage)
+        displayedText = formatLogs(logs: logs)
         lastLoaded = Date()
     }
 
-    // Mock function to simulate fetching data
-    private func fetchText() -> String {
-        let logs = CustomLogger.retrieveLogs()
+    // Function to fetch logs for a specific page
+    private func fetchLogsForPage(page: Int) -> [(Date, String)] {
+        let allLogs = Array(CustomLogger.retrieveLogs().reversed())
+        let startIndex = (page - 1) * logsPerPage
+        let endIndex = min(startIndex + logsPerPage, allLogs.count)
+
+        guard startIndex < allLogs.count else { return [] }
+        return Array(allLogs[startIndex..<endIndex])
+    }
+
+    // Function to format logs for display
+    private func formatLogs(logs: [(Date, String)]) -> String {
         let formatter = DateFormatter()
-        // formatter.dateStyle = .medium
-        // formatter.timeStyle = .medium
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         formatter.timeZone = TimeZone.current
 
@@ -79,4 +116,11 @@ struct LogView: View {
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
+
+    // Helper function to check if there is a next page
+    private func hasNextPage() -> Bool {
+        let totalLogs = CustomLogger.retrieveLogs().count
+        return currentPage * logsPerPage < totalLogs
+    }
 }
+
