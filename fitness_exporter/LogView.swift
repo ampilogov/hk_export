@@ -87,12 +87,10 @@ struct LogView: View {
 
     // Function to fetch logs for a specific page
     private func fetchLogsForPage(page: Int) -> [(Date, String)] {
-        let allLogs = Array(CustomLogger.retrieveLogs().reversed())
-        let startIndex = (page - 1) * logsPerPage
-        let endIndex = min(startIndex + logsPerPage, allLogs.count)
-
-        guard startIndex < allLogs.count else { return [] }
-        return Array(allLogs[startIndex..<endIndex])
+        let skip = (page - 1) * logsPerPage
+        let take = min(
+            logsPerPage, CustomLogger.getNumberOfLogsAvailable() - skip)
+        return CustomLogger.retrieveLogs(maxLogs: take, skip: skip)
     }
 
     // Function to format logs for display
@@ -106,7 +104,7 @@ struct LogView: View {
             return "\(localDate): \(string)"
         }
 
-        return formattedStrings.reversed().joined(separator: "\n")
+        return formattedStrings.joined(separator: "\n")
     }
 
     // Helper function to format dates
@@ -119,8 +117,7 @@ struct LogView: View {
 
     // Helper function to check if there is a next page
     private func hasNextPage() -> Bool {
-        let totalLogs = CustomLogger.retrieveLogs().count
+        let totalLogs = CustomLogger.getNumberOfLogsAvailable()
         return currentPage * logsPerPage < totalLogs
     }
 }
-

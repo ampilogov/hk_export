@@ -172,18 +172,20 @@ class ServerSession {
     private var session: URLSession
 
     private static let LOCK = NSLock()
-    private static var SESSIONS: [String: ServerSession] = [:]
+    private static var SESSIONS: [String: (ServerSession, Date)] = [:]
+    private static var TTL: TimeInterval = 60
 
     static func getSession(server: String) -> ServerSession {
         LOCK.lock()
         defer { LOCK.unlock() }
 
-        if let session = SESSIONS[server] {
-            return session
+        let now = Date()
+        if let entry = SESSIONS[server], entry.1 + TTL > now {
+            return entry.0
         }
 
         let session = ServerSession(server: server)
-        SESSIONS[server] = session
+        SESSIONS[server] = (session, now)
         return session
     }
 
