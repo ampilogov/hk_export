@@ -319,7 +319,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"fitness_exporter/Preview Content\"";
-				DEVELOPMENT_TEAM = 4A29MR88M9;
+				DEVELOPMENT_TEAM = EBA589ECLL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "fitness-exporter-Info.plist";
@@ -356,7 +356,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"fitness_exporter/Preview Content\"";
-				DEVELOPMENT_TEAM = 4A29MR88M9;
+				DEVELOPMENT_TEAM = EBA589ECLL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "fitness-exporter-Info.plist";
