@@ -114,7 +114,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let exporter = IncrementalExporter()
         exporter.run(
             sampleTypes: ExportConstants.getSampleTypesOfInterest(),
-            batchSize: 60 * 60 * 24 * 31
+            batchSize: 60 * 60 * 24 * 10
         ) {
             status in
             CustomLogger.log("[App] Processing task finished: \(status ?? "nil")")

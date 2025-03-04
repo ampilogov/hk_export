@@ -140,7 +140,7 @@ final class IncrementalExporter {
     private static let TIME_TO_FINALIZE: TimeInterval = 3 * 24 * 60 * 60
 
     private static let USER_DEFAULTS_KEY_PREFIX =
-        "IncrementalExporter_LastExportTime_"
+        "IncrementalExporter_LastExportTime_" + HealthDataExporter.VERSION + "_"
 
     init() {}
 
