@@ -161,7 +161,7 @@ struct DateRangeExporterView: View {
                         { [sampleType = $0] completion in
                             IncrementalExporter().run(
                                 sampleTypes: [sampleType],
-                                batchSize: 60 * 60 * 24 * 31,
+                                batchSize: 60 * 60 * 24 * 10,
                                 completion: completion
                             )
                         }

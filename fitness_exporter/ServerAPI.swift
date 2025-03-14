@@ -256,7 +256,7 @@ class ServerSession {
     }
 
     func sendPayloadsPList(
-        payloads: [[String: Any]], timeout: TimeInterval? = 20,
+        payloads: [[String: Any]], timeout: TimeInterval? = 60,
         completion: @escaping (String?) -> Void
     ) {
         if let url = URL(string: server) {

@@ -30,10 +30,10 @@ class Payload {
 }
 
 class HealthDataExporter {
-    static let VERSION = "v003"
+    static let VERSION = "v004"
     static let SENDER_EXTRA_KEY = "mnluucdsobcbkiae4a98"
 
-    static let PAYLOAD_SEND_THRESHOLD = 100 * (1 << 20)
+    static let PAYLOAD_SEND_THRESHOLD = 10 * (1 << 20)
 
     private var server: String
     private var serverSession: ServerSession
@@ -103,6 +103,67 @@ class HealthDataExporter {
         }
 
         healthStore.execute(query)
+    }
+
+    private func exportSample(
+        healthStore: HKHealthStore, sample: HKSample,
+        completion: @escaping (String?) -> Void
+    ) {
+        do {
+            if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
+                return self.exportHeartBeatSeries(
+                    healthStore: healthStore, heartbeatSeries: heartbeatSeries,
+                    completion: completion)
+            }
+
+            if let workoutRoute = sample as? HKWorkoutRoute {
+                return self.exportWorkoutRoute(
+                    healthStore: healthStore, workoutRoute: workoutRoute,
+                    completion: completion)
+            }
+
+            if let workout = sample as? HKWorkout {
+                return self.sendPayload(
+                    data: try self.encodeWorkout(workout: workout),
+                    type: "workout",
+                    completion: completion)
+            }
+
+            if let quanititySample = sample as? HKQuantitySample {
+                let series = extractSeries(
+                    quanititySample: quanititySample, healthStore: healthStore)
+                return self.sendPayload(
+                    data: try self.encodeQuantitySample(
+                        quantitySample: quanititySample, series: series),
+                    type: "quantity_sample",
+                    completion: completion)
+            }
+            if let categorySample = sample as? HKCategorySample {
+                return self.sendPayload(
+                    data: self.encodeCategorySample(
+                        categorySample: categorySample),
+                    type: "category_sample", completion: completion)
+            }
+            if let clinicalRecord = sample as? HKClinicalRecord {
+                return self.sendPayload(
+                    data: self.encodeClinicalRecord(
+                        clinicalRecord: clinicalRecord),
+                    type: "clinical_record", completion: completion)
+            }
+            if let stateOfMind = sample as? HKStateOfMind {
+                return self.sendPayload(
+                    data: self.encodeStateOfMind(stateOfMind: stateOfMind),
+                    type: "state_of_mind", completion: completion)
+            }
+
+            return completion(
+                "Failed to cast the class: \(type(of: sample)).\n\(sample.description)"
+            )
+        } catch {
+            return completion(
+                "Encountered error while exporting sample: \(error.localizedDescription)"
+            )
+        }
     }
 
     private func sendPayloadJson<T: Encodable>(
@@ -222,6 +283,54 @@ class HealthDataExporter {
         actuallySendPayloadsPList(completion: completion)
     }
 
+    private func extractSeries(
+        quanititySample: HKQuantitySample, healthStore: HKHealthStore
+    ) -> [(DateInterval, HKQuantity)] {
+        if quanititySample.count > 1 {
+            let objectPredicate = HKQuery.predicateForObject(
+                with: quanititySample.uuid)
+            let predicate = HKSamplePredicate.quantitySample(
+                type: quanititySample.quantityType,
+                predicate: objectPredicate)
+            let seriesDescriptor =
+                HKQuantitySeriesSampleQueryDescriptor(
+                    predicate: predicate,
+                    options: .orderByQuantitySampleStartDate)
+            let asyncSeries = seriesDescriptor.results(for: healthStore)
+            var series: [(DateInterval, HKQuantity)] = []
+            let semaphore = DispatchSemaphore(value: 0)
+            Task {
+                for try await entry in asyncSeries {
+                    series.append((entry.dateInterval, entry.quantity))
+                }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            if series.count == 1 {
+                assert(quanititySample.count == 1)
+                let dateInterval = series[0].0
+                let value = series[0].1
+                assert(dateInterval.start == quanititySample.startDate)
+                assert(
+                    dateInterval.start + dateInterval.duration
+                        == quanititySample.endDate)
+                assert(value == quanititySample.quantity)
+                // print("\(Date()) -- ok")
+            }
+            return series
+        } else {
+            let series = [
+                (
+                    DateInterval(
+                        start: quanititySample.startDate,
+                        end: quanititySample.endDate),
+                    quanititySample.quantity
+                )
+            ]
+            return series
+        }
+    }
+
     private func exportHeartBeatSeries(
         healthStore: HKHealthStore, heartbeatSeries: HKHeartbeatSeriesSample,
         completion: @escaping (String?) -> Void
@@ -267,7 +376,7 @@ class HealthDataExporter {
         healthStore: HKHealthStore, workoutRoute: HKWorkoutRoute,
         completion: @escaping (String?) -> Void
     ) {
-        var cLocations: [CCLLocation] = []
+        var locations: [CLLocation] = []
 
         let workoutRouteQuery = HKWorkoutRouteQuery(route: workoutRoute) {
             (query, locationsOrNil, done, error) in
@@ -277,87 +386,30 @@ class HealthDataExporter {
                 )
             }
 
-            guard let locations = locationsOrNil else {
+            guard let locationsPart = locationsOrNil else {
                 fatalError(
                     "*** Invalid State: This can only fail if there was an error. ***"
                 )
             }
 
-            cLocations.append(contentsOf: locations.map(self.encodeCLLocation))
+            locations.append(contentsOf: locationsPart)
 
-            if done != (cLocations.count == workoutRoute.count) {
+            if done != (locations.count == workoutRoute.count) {
                 fatalError(
-                    "Workout route query issue: \(done) \(cLocations.count)/\(workoutRoute.count)"
+                    "Workout route query issue: \(done) \(locations.count)/\(workoutRoute.count)"
                 )
             }
-            if cLocations.count == workoutRoute.count {
-                let cLocationsArr = CCLLocations(locations: cLocations)
+            if locations.count == workoutRoute.count {
                 self.sendPayload(
-                    data: cLocationsArr, type: "workout_route",
+                    data: self.encodeWorkoutRoute(
+                        route: workoutRoute, locations: locations),
+                    type: "workout_route",
                     completion: completion)
-            } else if cLocations.count > workoutRoute.count {
+            } else if locations.count > workoutRoute.count {
                 fatalError("Too many samples in workout route")
             }
         }
         healthStore.execute(workoutRouteQuery)
-    }
-
-    private func exportSample(
-        healthStore: HKHealthStore, sample: HKSample,
-        completion: @escaping (String?) -> Void
-    ) {
-        do {
-            if let heartbeatSeries = sample as? HKHeartbeatSeriesSample {
-                return self.exportHeartBeatSeries(
-                    healthStore: healthStore, heartbeatSeries: heartbeatSeries,
-                    completion: completion)
-            }
-
-            if let workoutRoute = sample as? HKWorkoutRoute {
-                return self.exportWorkoutRoute(
-                    healthStore: healthStore, workoutRoute: workoutRoute,
-                    completion: completion)
-            }
-
-            if let workout = sample as? HKWorkout {
-                return self.sendPayload(
-                    data: try self.encodeWorkout(workout: workout),
-                    type: "workout",
-                    completion: completion)
-            }
-            if let quanititySample = sample as? HKQuantitySample {
-                return self.sendPayload(
-                    data: try self.encodeQuantitySample(
-                        quantitySample: quanititySample),
-                    type: "quantity_sample",
-                    completion: completion)
-            }
-            if let categorySample = sample as? HKCategorySample {
-                return self.sendPayload(
-                    data: self.encodeCategorySample(
-                        categorySample: categorySample),
-                    type: "category_sample", completion: completion)
-            }
-            if let clinicalRecord = sample as? HKClinicalRecord {
-                return self.sendPayload(
-                    data: self.encodeClinicalRecord(
-                        clinicalRecord: clinicalRecord),
-                    type: "clinical_record", completion: completion)
-            }
-            if let stateOfMind = sample as? HKStateOfMind {
-                return self.sendPayload(
-                    data: self.encodeStateOfMind(stateOfMind: stateOfMind),
-                    type: "state_of_mind", completion: completion)
-            }
-
-            return completion(
-                "Failed to cast the class: \(type(of: sample)).\n\(sample.description)"
-            )
-        } catch {
-            return completion(
-                "Encountered error while exporting sample: \(error.localizedDescription)"
-            )
-        }
     }
 
     private let sampleQueue = DispatchQueue(
@@ -748,23 +800,45 @@ class HealthDataExporter {
         )
     }
 
+    struct CQuantitySampleSeriesEntry: Codable {
+        let dateInterval: DateInterval
+        let quantity: CQuantity
+    }
+
+    private func encodeQuantitySampleSeriesEntry(
+        dateInterval: DateInterval, quantity: HKQuantity
+    ) throws -> CQuantitySampleSeriesEntry {
+        return CQuantitySampleSeriesEntry(
+            dateInterval: dateInterval,
+            quantity: try encodeQuantity(quantity: quantity)
+        )
+    }
+
     struct CQuantitySample: Codable {
         let superSample: CSample
         let quantity: CQuantity
         let count: Int
         let quantityType: CQuantityType
+        let series: [CQuantitySampleSeriesEntry]
     }
 
-    private func encodeQuantitySample(quantitySample: HKQuantitySample)
+    private func encodeQuantitySample(
+        quantitySample: HKQuantitySample, series: [(DateInterval, HKQuantity)]
+    )
         throws
         -> CQuantitySample
     {
+        assert(quantitySample.count == series.count)
         return CQuantitySample(
             superSample: encodeSample(sample: quantitySample),
             quantity: try encodeQuantity(quantity: quantitySample.quantity),
             count: quantitySample.count,
             quantityType: encodeQuantityType(
-                quantityType: quantitySample.quantityType))
+                quantityType: quantitySample.quantityType),
+            series: try series.map {
+                try encodeQuantitySampleSeriesEntry(
+                    dateInterval: $0.0, quantity: $0.1)
+            })
     }
 
     struct CSeriesSample: Codable {
@@ -781,7 +855,7 @@ class HealthDataExporter {
     }
 
     struct CHeartbeatSeriesSample: Codable {
-        let seriesSample: CSeriesSample
+        let superSeriesSample: CSeriesSample
         let timeSinceSeriesStart: [Double]
         let precededByGap: [Bool]
     }
@@ -792,7 +866,7 @@ class HealthDataExporter {
         precededByGap: [Bool]
     ) -> CHeartbeatSeriesSample {
         return CHeartbeatSeriesSample(
-            seriesSample: encodeSeriesSample(
+            superSeriesSample: encodeSeriesSample(
                 seriesSample: heartbeatSeriesSample),
             timeSinceSeriesStart: timeSinceSeriesStart,
             precededByGap: precededByGap)
@@ -819,10 +893,6 @@ class HealthDataExporter {
         let courseAccuracy: Double
     }
 
-    struct CCLLocations: Codable {
-        let locations: [CCLLocation]
-    }
-
     private func encodeCLLocation(location: CLLocation) -> CCLLocation {
         return CCLLocation(
             latitude: location.coordinate.latitude,
@@ -844,6 +914,20 @@ class HealthDataExporter {
             speedAccuracy: location.speedAccuracy,
             course: location.course,
             courseAccuracy: location.courseAccuracy)
+    }
+
+    struct CWorkoutRoute: Codable {
+        let superSeriesSample: CSeriesSample
+        let locations: [CCLLocation]
+
+    }
+
+    private func encodeWorkoutRoute(
+        route: HKWorkoutRoute, locations: [CLLocation]
+    ) -> CWorkoutRoute {
+        return CWorkoutRoute(
+            superSeriesSample: encodeSeriesSample(seriesSample: route),
+            locations: locations.map { encodeCLLocation(location: $0) })
     }
 
     struct CCategorySample: Codable {
