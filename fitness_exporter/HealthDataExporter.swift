@@ -130,25 +130,8 @@ class HealthDataExporter {
             }
 
             if let quanititySample = sample as? HKQuantitySample {
-                let objectPredicate = HKQuery.predicateForObject(
-                    with: quanititySample.uuid)
-                let predicate = HKSamplePredicate.quantitySample(
-                    type: quanititySample.quantityType,
-                    predicate: objectPredicate)
-                let seriesDescriptor =
-                    HKQuantitySeriesSampleQueryDescriptor(
-                        predicate: predicate,
-                        options: .orderByQuantitySampleStartDate)
-                let asyncSeries = seriesDescriptor.results(for: healthStore)
-                var series: [(DateInterval, HKQuantity)] = []
-                let semaphore = DispatchSemaphore(value: 0)
-                Task {
-                    for try await entry in asyncSeries {
-                        series.append((entry.dateInterval, entry.quantity))
-                    }
-                    semaphore.signal()
-                }
-                semaphore.wait()
+                let series = extractSeries(
+                    quanititySample: quanititySample, healthStore: healthStore)
                 return self.sendPayload(
                     data: try self.encodeQuantitySample(
                         quantitySample: quanititySample, series: series),
@@ -298,6 +281,54 @@ class HealthDataExporter {
     ) {
         //        actuallySendPayloadsJson(completion: completion)
         actuallySendPayloadsPList(completion: completion)
+    }
+
+    private func extractSeries(
+        quanititySample: HKQuantitySample, healthStore: HKHealthStore
+    ) -> [(DateInterval, HKQuantity)] {
+        if quanititySample.count > 1 {
+            let objectPredicate = HKQuery.predicateForObject(
+                with: quanititySample.uuid)
+            let predicate = HKSamplePredicate.quantitySample(
+                type: quanititySample.quantityType,
+                predicate: objectPredicate)
+            let seriesDescriptor =
+                HKQuantitySeriesSampleQueryDescriptor(
+                    predicate: predicate,
+                    options: .orderByQuantitySampleStartDate)
+            let asyncSeries = seriesDescriptor.results(for: healthStore)
+            var series: [(DateInterval, HKQuantity)] = []
+            let semaphore = DispatchSemaphore(value: 0)
+            Task {
+                for try await entry in asyncSeries {
+                    series.append((entry.dateInterval, entry.quantity))
+                }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            if series.count == 1 {
+                assert(quanititySample.count == 1)
+                let dateInterval = series[0].0
+                let value = series[0].1
+                assert(dateInterval.start == quanititySample.startDate)
+                assert(
+                    dateInterval.start + dateInterval.duration
+                        == quanititySample.endDate)
+                assert(value == quanititySample.quantity)
+                // print("\(Date()) -- ok")
+            }
+            return series
+        } else {
+            let series = [
+                (
+                    DateInterval(
+                        start: quanititySample.startDate,
+                        end: quanititySample.endDate),
+                    quanititySample.quantity
+                )
+            ]
+            return series
+        }
     }
 
     private func exportHeartBeatSeries(
