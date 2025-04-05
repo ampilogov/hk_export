@@ -117,7 +117,49 @@ class CustomSessionDelegate: NSObject, URLSessionDelegate {
             }
             completionHandler(.useCredential, clientCredential)
             return
+        } else if challenge.protectionSpace.authenticationMethod
+            == NSURLAuthenticationMethodServerTrust
+        {
+            guard let serverTrust = challenge.protectionSpace.serverTrust else {
+                CustomLogger.log("Failed to get server trust")
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+
+            guard let myServerCertificate = loadServerCertificate() else {
+                CustomLogger.log("Failed to load custom certificate")
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+
+            // Get the certificate chain
+            guard
+                let certificates = SecTrustCopyCertificateChain(serverTrust)
+                    as? [SecCertificate]
+            else {
+                CustomLogger.log("Failed to copy certificate chain")
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+
+            for serverCertificate in certificates {
+                let serverCertificateData =
+                    SecCertificateCopyData(serverCertificate) as Data
+                let localCertificateData =
+                    SecCertificateCopyData(myServerCertificate) as Data
+
+                if serverCertificateData == localCertificateData {
+                    let credential = URLCredential(trust: serverTrust)
+                    completionHandler(.useCredential, credential)
+                    return
+                }
+            }
+
+//            CustomLogger.log("Certificate not trusted")
+//            completionHandler(.cancelAuthenticationChallenge, nil)
+//            return
         }
+
         completionHandler(.performDefaultHandling, nil)
     }
 }
