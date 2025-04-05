@@ -14,6 +14,7 @@
 		AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */; };
 		ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */; };
 		ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F33A2D193E550059ADA2 /* LogView.swift */; };
+		ACC4F33D2D1FBCCC0059ADA2 /* server_cert.der in Resources */ = {isa = PBXBuildFile; fileRef = ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */; };
 		ACC4F3412D1FBCE80059ADA2 /* client_cert.p12 in Resources */ = {isa = PBXBuildFile; fileRef = ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */; };
 		ACC4F3432D1FC4F60059ADA2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */; };
 		ACC4F3452D211D2B0059ADA2 /* IncrementalExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */; };
@@ -33,6 +34,7 @@
 		AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Info.plist"; sourceTree = SOURCE_ROOT; };
 		ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomLogger.swift; sourceTree = "<group>"; };
 		ACC4F33A2D193E550059ADA2 /* LogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogView.swift; sourceTree = "<group>"; };
+		ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = server_cert.der; sourceTree = "<group>"; };
 		ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */ = {isa = PBXFileReference; lastKnownFileType = file; path = client_cert.p12; sourceTree = "<group>"; };
 		ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncrementalExporter.swift; sourceTree = "<group>"; };
@@ -76,6 +78,7 @@
 				ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */,
 				ACC4F3422D1FC4F00059ADA2 /* SettingsView.swift */,
 				ACC4F3402D1FBCE80059ADA2 /* client_cert.p12 */,
+				ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */,
 				ACC4F33A2D193E550059ADA2 /* LogView.swift */,
 				ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */,
 				ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */,
@@ -158,6 +161,7 @@
 			files = (
 				ACC4F3412D1FBCE80059ADA2 /* client_cert.p12 in Resources */,
 				AC6C78542BAF905700E4A6C3 /* Preview Assets.xcassets in Resources */,
+				ACC4F33D2D1FBCCC0059ADA2 /* server_cert.der in Resources */,
 				AC6C78512BAF905700E4A6C3 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
