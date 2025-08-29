@@ -7,11 +7,24 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AC5DEEE12E17A55D006CE2FB /* HRVView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5DEEE02E17A55D006CE2FB /* HRVView.swift */; };
+		AC5DEEE22E17A55D006CE2FB /* BluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5DEEDF2E17A55D006CE2FB /* BluetoothManager.swift */; };
+		AC61D3672E4EA63300BB53A3 /* ContinuousRecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A0003ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift */; };
+		AC61D3692E558D5800BB53A3 /* UploadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC61D3682E558D5800BB53A3 /* UploadView.swift */; };
 		AC6C784D2BAF905500E4A6C3 /* fitness_exporterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */; };
 		AC6C784F2BAF905500E4A6C3 /* ExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C784E2BAF905500E4A6C3 /* ExportView.swift */; };
 		AC6C78512BAF905700E4A6C3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78502BAF905700E4A6C3 /* Assets.xcassets */; };
 		AC6C78542BAF905700E4A6C3 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AC6C78532BAF905700E4A6C3 /* Preview Assets.xcassets */; };
 		AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */; };
+		ACC37A932E1CE33B00832ACF /* HRVOrthostatic.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A922E1CE33700832ACF /* HRVOrthostatic.swift */; };
+		ACC37A962E2616F400832ACF /* PolarBleSdk in Frameworks */ = {isa = PBXBuildFile; productRef = ACC37A952E2616F400832ACF /* PolarBleSdk */; };
+		ACC37A982E2F662B00832ACF /* BluetoothBackends.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A972E2F662B00832ACF /* BluetoothBackends.swift */; };
+		ACC37A9A2E328E4E00832ACF /* BluetoothUUID.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A992E328E4E00832ACF /* BluetoothUUID.swift */; };
+		ACC37A9D2E35D9BC00832ACF /* HRVMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A9C2E35D9BC00832ACF /* HRVMetrics.swift */; };
+		ACC37A9E2E35D9BC00832ACF /* SensorBagRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A9B2E35D9BC00832ACF /* SensorBagRecorder.swift */; };
+		ACC37AA02E35EEA000832ACF /* SensorTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37A9F2E35EEA000832ACF /* SensorTypes.swift */; };
+		ACC37AA22E48575D00832ACF /* SensorBagPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37AA12E48575D00832ACF /* SensorBagPersistence.swift */; };
+		ACC37AA42E48577F00832ACF /* ContinuousRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC37AA32E48577F00832ACF /* ContinuousRecorder.swift */; };
 		ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */; };
 		ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F33A2D193E550059ADA2 /* LogView.swift */; };
 		ACC4F33D2D1FBCCC0059ADA2 /* server_cert.der in Resources */ = {isa = PBXBuildFile; fileRef = ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */; };
@@ -20,10 +33,34 @@
 		ACC4F3452D211D2B0059ADA2 /* IncrementalExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */; };
 		ACC4F3472D271D840059ADA2 /* ServerAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3462D271D010059ADA2 /* ServerAPI.swift */; };
 		ACC4F3492D2740B80059ADA2 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC4F3482D2740B60059ADA2 /* Constants.swift */; };
+		ACD4F3612F12345600A1B2C3 /* RRIntervalGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACD4F3602F12345600A1B2C3 /* RRIntervalGraph.swift */; };
+		ACDEF2242F7777AA00BEEF01 /* UploadCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACDEF2232F7777AA00BEEF01 /* UploadCore.swift */; };
 		ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */; };
+		ACF0E0022F77700100AAA111 /* HRVEventBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF0E0012F77700100AAA111 /* HRVEventBridge.swift */; };
+		ACF1A0013ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A0003ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift */; };
+		ACF1A0113ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A0103ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift */; };
+		ACF1A0123ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A00F3ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift */; };
+		ACF1A0153ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		ACF1A00C3ABCDEFF00AAA100 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				ACF1A0153ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		AC5DEEDF2E17A55D006CE2FB /* BluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothManager.swift; sourceTree = "<group>"; };
+		AC5DEEE02E17A55D006CE2FB /* HRVView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HRVView.swift; sourceTree = "<group>"; };
+		AC61D3682E558D5800BB53A3 /* UploadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadView.swift; sourceTree = "<group>"; };
 		AC6C78492BAF905500E4A6C3 /* fitness_exporter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = fitness_exporter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = fitness_exporterApp.swift; sourceTree = "<group>"; };
 		AC6C784E2BAF905500E4A6C3 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
@@ -32,6 +69,14 @@
 		AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataExporter.swift; sourceTree = "<group>"; };
 		AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = fitness_exporter.entitlements; sourceTree = "<group>"; };
 		AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Info.plist"; sourceTree = SOURCE_ROOT; };
+		ACC37A922E1CE33700832ACF /* HRVOrthostatic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HRVOrthostatic.swift; sourceTree = "<group>"; };
+		ACC37A972E2F662B00832ACF /* BluetoothBackends.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothBackends.swift; sourceTree = "<group>"; };
+		ACC37A992E328E4E00832ACF /* BluetoothUUID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothUUID.swift; sourceTree = "<group>"; };
+		ACC37A9B2E35D9BC00832ACF /* SensorBagRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagRecorder.swift; sourceTree = "<group>"; };
+		ACC37A9C2E35D9BC00832ACF /* HRVMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HRVMetrics.swift; sourceTree = "<group>"; };
+		ACC37A9F2E35EEA000832ACF /* SensorTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorTypes.swift; sourceTree = "<group>"; };
+		ACC37AA12E48575D00832ACF /* SensorBagPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagPersistence.swift; sourceTree = "<group>"; };
+		ACC37AA32E48577F00832ACF /* ContinuousRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuousRecorder.swift; sourceTree = "<group>"; };
 		ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomLogger.swift; sourceTree = "<group>"; };
 		ACC4F33A2D193E550059ADA2 /* LogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogView.swift; sourceTree = "<group>"; };
 		ACC4F33C2D1FBCCC0059ADA2 /* server_cert.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = server_cert.der; sourceTree = "<group>"; };
@@ -40,11 +85,27 @@
 		ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncrementalExporter.swift; sourceTree = "<group>"; };
 		ACC4F3462D271D010059ADA2 /* ServerAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerAPI.swift; sourceTree = "<group>"; };
 		ACC4F3482D2740B60059ADA2 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		ACD4F3602F12345600A1B2C3 /* RRIntervalGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RRIntervalGraph.swift; sourceTree = "<group>"; };
+		ACDEF2232F7777AA00BEEF01 /* UploadCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadCore.swift; sourceTree = "<group>"; };
 		ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		ACF0E0012F77700100AAA111 /* HRVEventBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HRVEventBridge.swift; sourceTree = "<group>"; };
+		ACF1A0003ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuousRecordingAttributes.swift; sourceTree = "<group>"; };
+		ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = fitness_exporterLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		ACF1A00F3ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = fitness_exporterLiveActivityBundle.swift; sourceTree = "<group>"; };
+		ACF1A0103ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuousRecordingLiveActivity.swift; sourceTree = "<group>"; };
+		ACF1A0133ABCDEFF00AAA100 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AC6C78462BAF905500E4A6C3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ACC37A962E2616F400832ACF /* PolarBleSdk in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ACF1A00B3ABCDEFF00AAA100 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -59,6 +120,7 @@
 			children = (
 				AC6C784B2BAF905500E4A6C3 /* fitness_exporter */,
 				AC6C784A2BAF905500E4A6C3 /* Products */,
+				ACF1A00D3ABCDEFF00AAA100 /* fitness_exporterLiveActivity */,
 			);
 			sourceTree = "<group>";
 		};
@@ -66,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				AC6C78492BAF905500E4A6C3 /* fitness_exporter.app */,
+				ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -73,6 +136,20 @@
 		AC6C784B2BAF905500E4A6C3 /* fitness_exporter */ = {
 			isa = PBXGroup;
 			children = (
+				ACDEF2232F7777AA00BEEF01 /* UploadCore.swift */,
+				AC61D3682E558D5800BB53A3 /* UploadView.swift */,
+				ACF0E0012F77700100AAA111 /* HRVEventBridge.swift */,
+				ACC37AA32E48577F00832ACF /* ContinuousRecorder.swift */,
+				ACC37AA12E48575D00832ACF /* SensorBagPersistence.swift */,
+				ACC37A9F2E35EEA000832ACF /* SensorTypes.swift */,
+				ACC37A9B2E35D9BC00832ACF /* SensorBagRecorder.swift */,
+				ACC37A9C2E35D9BC00832ACF /* HRVMetrics.swift */,
+				ACC37A992E328E4E00832ACF /* BluetoothUUID.swift */,
+				ACC37A922E1CE33700832ACF /* HRVOrthostatic.swift */,
+				ACC37A972E2F662B00832ACF /* BluetoothBackends.swift */,
+				AC5DEEDF2E17A55D006CE2FB /* BluetoothManager.swift */,
+				AC5DEEE02E17A55D006CE2FB /* HRVView.swift */,
+				ACD4F3602F12345600A1B2C3 /* RRIntervalGraph.swift */,
 				ACC4F3482D2740B60059ADA2 /* Constants.swift */,
 				ACC4F3462D271D010059ADA2 /* ServerAPI.swift */,
 				ACC4F3442D211D230059ADA2 /* IncrementalExporter.swift */,
@@ -89,6 +166,7 @@
 				AC6C78502BAF905700E4A6C3 /* Assets.xcassets */,
 				AC6C78522BAF905700E4A6C3 /* Preview Content */,
 				AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */,
+				ACF1A0003ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift */,
 			);
 			path = fitness_exporter;
 			sourceTree = "<group>";
@@ -101,6 +179,16 @@
 			path = "Preview Content";
 			sourceTree = "<group>";
 		};
+		ACF1A00D3ABCDEFF00AAA100 /* fitness_exporterLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				ACF1A0103ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift */,
+				ACF1A00F3ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift */,
+				ACF1A0133ABCDEFF00AAA100 /* Info.plist */,
+			);
+			path = fitness_exporterLiveActivity;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -111,6 +199,7 @@
 				AC6C78452BAF905500E4A6C3 /* Sources */,
 				AC6C78462BAF905500E4A6C3 /* Frameworks */,
 				AC6C78472BAF905500E4A6C3 /* Resources */,
+				ACF1A00C3ABCDEFF00AAA100 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
@@ -120,6 +209,22 @@
 			productName = fitness_exporter;
 			productReference = AC6C78492BAF905500E4A6C3 /* fitness_exporter.app */;
 			productType = "com.apple.product-type.application";
+		};
+		ACF1A0073ABCDEFF00AAA100 /* fitness_exporterLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ACF1A00A3ABCDEFF00AAA100 /* Build configuration list for PBXNativeTarget "fitness_exporterLiveActivity" */;
+			buildPhases = (
+				ACF1A0083ABCDEFF00AAA100 /* Sources */,
+				ACF1A00B3ABCDEFF00AAA100 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = fitness_exporterLiveActivity;
+			productName = fitness_exporterLiveActivity;
+			productReference = ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -145,11 +250,15 @@
 				Base,
 			);
 			mainGroup = AC6C78402BAF905500E4A6C3;
+			packageReferences = (
+				ACC37A942E2616F400832ACF /* XCRemoteSwiftPackageReference "polar-ble-sdk" */,
+			);
 			productRefGroup = AC6C784A2BAF905500E4A6C3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				AC6C78482BAF905500E4A6C3 /* fitness_exporter */,
+				ACF1A0073ABCDEFF00AAA100 /* fitness_exporterLiveActivity */,
 			);
 		};
 /* End PBXProject section */
@@ -173,16 +282,41 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ACDEF2242F7777AA00BEEF01 /* UploadCore.swift in Sources */,
+				ACF1A0013ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift in Sources */,
+				ACF0E0022F77700100AAA111 /* HRVEventBridge.swift in Sources */,
+				AC5DEEE12E17A55D006CE2FB /* HRVView.swift in Sources */,
+				AC61D3692E558D5800BB53A3 /* UploadView.swift in Sources */,
+				AC5DEEE22E17A55D006CE2FB /* BluetoothManager.swift in Sources */,
+				ACC37AA42E48577F00832ACF /* ContinuousRecorder.swift in Sources */,
+				ACC37A9D2E35D9BC00832ACF /* HRVMetrics.swift in Sources */,
+				ACC37A9E2E35D9BC00832ACF /* SensorBagRecorder.swift in Sources */,
 				ACC4F3432D1FC4F60059ADA2 /* SettingsView.swift in Sources */,
 				ACE49DE12D0AAD9B0003EE5E /* AppDelegate.swift in Sources */,
+				ACC37AA22E48575D00832ACF /* SensorBagPersistence.swift in Sources */,
 				ACC4F33B2D193E5B0059ADA2 /* LogView.swift in Sources */,
 				AC6C785B2BAF949000E4A6C3 /* HealthDataExporter.swift in Sources */,
 				AC6C784F2BAF905500E4A6C3 /* ExportView.swift in Sources */,
 				ACC4F3492D2740B80059ADA2 /* Constants.swift in Sources */,
+				ACC37A932E1CE33B00832ACF /* HRVOrthostatic.swift in Sources */,
 				AC6C784D2BAF905500E4A6C3 /* fitness_exporterApp.swift in Sources */,
 				ACC4F3392D1935A20059ADA2 /* CustomLogger.swift in Sources */,
+				ACC37AA02E35EEA000832ACF /* SensorTypes.swift in Sources */,
 				ACC4F3472D271D840059ADA2 /* ServerAPI.swift in Sources */,
 				ACC4F3452D211D2B0059ADA2 /* IncrementalExporter.swift in Sources */,
+				ACC37A9A2E328E4E00832ACF /* BluetoothUUID.swift in Sources */,
+				ACC37A982E2F662B00832ACF /* BluetoothBackends.swift in Sources */,
+				ACD4F3612F12345600A1B2C3 /* RRIntervalGraph.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ACF1A0083ABCDEFF00AAA100 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ACF1A0113ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift in Sources */,
+				ACF1A0123ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift in Sources */,
+				AC61D3672E4EA63300BB53A3 /* ContinuousRecordingAttributes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -193,6 +327,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter";
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -256,6 +391,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter";
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -324,7 +460,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "fitness-exporter-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "HK Export";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Hey wtf is this ";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app connects to Polar H10 to measure heart rate variability.";
+				INFOPLIST_KEY_NSHealthClinicalHealthRecordsShareUsageDescription = "This app uses your clinical health records to provide personalized health insights and recommendations.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is recorded with HRV sessions.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -336,15 +477,16 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -364,7 +506,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "fitness-exporter-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "HK Export";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Hey wtf is this ";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app connects to Polar H10 to measure heart rate variability.";
+				INFOPLIST_KEY_NSHealthClinicalHealthRecordsShareUsageDescription = "This app uses your clinical health records to provide personalized health insights and recommendations.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is recorded with HRV sessions.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -376,15 +523,66 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		ACF1A0053ABCDEFF00AAA100 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = EBA589ECLL;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).continuous-recording";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		ACF1A0063ABCDEFF00AAA100 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = EBA589ECLL;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).continuous-recording";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -409,7 +607,35 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		ACF1A00A3ABCDEFF00AAA100 /* Build configuration list for PBXNativeTarget "fitness_exporterLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ACF1A0053ABCDEFF00AAA100 /* Debug */,
+				ACF1A0063ABCDEFF00AAA100 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		ACC37A942E2616F400832ACF /* XCRemoteSwiftPackageReference "polar-ble-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/polarofficial/polar-ble-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.4.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		ACC37A952E2616F400832ACF /* PolarBleSdk */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = ACC37A942E2616F400832ACF /* XCRemoteSwiftPackageReference "polar-ble-sdk" */;
+			productName = PolarBleSdk;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AC6C78412BAF905500E4A6C3 /* Project object */;
 }

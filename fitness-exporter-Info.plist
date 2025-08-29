@@ -6,16 +6,25 @@
 	<false/>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>We use HealthKit data to provide insights in the app.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
 		<string>processing</string>
 		<string>remote-notification</string>
+		<string>bluetooth-central</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.artemz.fitness_exporter.app_refresh</string>
 		<string>com.artemz.fitness_exporter.processing</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>com.apple.developer.activity-types</key>
+	<array>
+		<string>liveActivities</string>
 	</array>
 	<key>NSHealthClinicalHealthRecordsShareUsageDescription</key>
 	<string>This app uses your clinical health records to provide personalized health insights and recommendations.</string>
