@@ -1058,25 +1058,42 @@ class HealthDataExporter {
 }
 
 class HealthKitManager {
-    static func initialize(
+    // Unified sets of permissions used across the app
+    private static func unifiedReadTypes() -> Set<HKObjectType> {
+        return Set(ExportConstants.getSampleTypesOfInterest().map { $0 as HKObjectType })
+    }
+
+    private static func unifiedShareTypes() -> Set<HKSampleType> {
+        var share: [HKSampleType] = [
+            HKSeriesType.heartbeat(),
+        ]
+        if let hrv = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN) {
+            share.append(hrv)
+        }
+        if let hr = HKQuantityType.quantityType(forIdentifier: .heartRate) {
+            share.append(hr)
+        }
+        return Set(share)
+    }
+
+    /// Centralized authorization request. Always asks for the same sets.
+    static func requestUnifiedAuthorization(
         startObservers: Bool,
         completion: @escaping (Bool) -> Void
     ) {
         guard HKHealthStore.isHealthDataAvailable() else {
             CustomLogger.log("[HKM][Error] Health data is not available.")
-            return
+            return completion(false)
         }
 
         let healthStore = HKHealthStore()
+        let readTypes = unifiedReadTypes()
+        let shareTypes = unifiedShareTypes()
 
-        let sampleTypes = ExportConstants.getSampleTypesOfInterest()
-
-        healthStore.requestAuthorization(toShare: Set(), read: Set(sampleTypes))
-        {
+        healthStore.requestAuthorization(toShare: shareTypes, read: readTypes) {
             okay, error in
             if let error = error {
-                CustomLogger.log(
-                    "[HKM][Error] Error requesting authorization: \(error)")
+                CustomLogger.log("[HKM][Error] Error requesting authorization: \(error)")
                 return completion(false)
             }
             if !okay {
@@ -1084,12 +1101,20 @@ class HealthKitManager {
                 return completion(false)
             }
             if startObservers {
-                for sampleType in sampleTypes {
+                for sampleType in ExportConstants.getSampleTypesOfInterest() {
                     enableBackgroundDelivery(healthStore, sampleType)
                 }
             }
             return completion(true)
         }
+    }
+
+    static func initialize(
+        startObservers: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        // Delegate to the unified flow to ensure consistency
+        requestUnifiedAuthorization(startObservers: startObservers, completion: completion)
     }
 
     private static func enableBackgroundDelivery(

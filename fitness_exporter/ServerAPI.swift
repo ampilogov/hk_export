@@ -186,6 +186,64 @@ class ServerSession {
         return session
     }
 
+    func uploadFile(
+        dirName: String,
+        fileName: String,
+        fileBytes: Data,
+        fullPath: String,
+        sender: String,
+        timeout: TimeInterval? = 60,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard let baseURL = URL(string: server) else {
+            return completion("Invalid base URL: \(server)")
+        }
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("file"))
+        request.httpMethod = "POST"
+        if let timeout = timeout { request.timeoutInterval = timeout }
+        request.setValue("application/x-plist", forHTTPHeaderField: "Content-Type")
+        request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+
+        let senderHash = SHA256.hash(
+            data: Data((sender + HealthDataExporter.SENDER_EXTRA_KEY).utf8)
+        ).compactMap { String(format: "%02x", $0) }.joined()
+
+        let payload: [String: Any] = [
+            "version": HealthDataExporter.VERSION,
+            "sender_sha256": senderHash,
+            "dir_name": dirName,
+            "file_name": fileName,
+            "full_path": fullPath,
+            "file_bytes": fileBytes,
+        ]
+
+        do {
+            let plist = try PropertyListSerialization.data(
+                fromPropertyList: payload, format: .binary, options: 0
+            )
+            if let gz = compress(data: plist) {
+                request.httpBody = gz
+            } else {
+                return completion("Failed to compress upload body")
+            }
+        } catch {
+            return completion("Failed to encode upload payload: \(error.localizedDescription)")
+        }
+
+        performRequestWithRetry(request, attempts: 4) { _, response, error in
+            if let error = error {
+                CustomLogger.log("Upload client error: \(error.localizedDescription)")
+                return completion("Client error: \(error.localizedDescription)")
+            }
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode) else {
+                return completion("Server error: \(String(describing: response))")
+            }
+            return completion(nil)
+        }
+    }
+
     private init(server: String) {
         self.server = server
 
@@ -194,9 +252,82 @@ class ServerSession {
         configuration.urlCache = nil
         configuration.httpShouldSetCookies = true
         configuration.httpShouldUsePipelining = true
+        // Improve resilience under poor connectivity
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 600
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
         self.session = URLSession(
             configuration: configuration, delegate: CustomSessionDelegate(),
             delegateQueue: nil)
+    }
+
+    // Retry helpers for transient failures and selected HTTP responses
+    private func isTransient(error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut,
+             .cannotFindHost,
+             .cannotConnectToHost,
+             .networkConnectionLost,
+             .dnsLookupFailed,
+             .notConnectedToInternet,
+             .internationalRoamingOff,
+             .callIsActive,
+             .dataNotAllowed,
+             .requestBodyStreamExhausted,
+             .backgroundSessionWasDisconnected:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func shouldRetry(statusCode: Int) -> Bool {
+        switch statusCode {
+        case 408, 429, 500, 502, 503, 504: return true
+        default: return false
+        }
+    }
+
+    private func performRequestWithRetry(
+        _ request: URLRequest,
+        attempts: Int = 3,
+        initialDelay: TimeInterval = 1.0,
+        backoff: Double = 2.0,
+        maxDelay: TimeInterval = 10.0,
+        completion: @escaping (Data?, URLResponse?, Error?) -> Void
+    ) {
+        func attempt(_ index: Int, currentDelay: TimeInterval) {
+            let task = self.session.dataTask(with: request) { data, response, error in
+                if error == nil, let http = response as? HTTPURLResponse,
+                   (200...299).contains(http.statusCode) {
+                    return completion(data, response, nil)
+                }
+
+                var retryable = false
+                if let error = error, self.isTransient(error: error) {
+                    retryable = true
+                } else if let http = response as? HTTPURLResponse, self.shouldRetry(statusCode: http.statusCode) {
+                    retryable = true
+                }
+
+                if retryable && index < attempts {
+                    let nextDelay = min(maxDelay, currentDelay * backoff)
+                    let jitter = Double.random(in: -0.2...0.2) * currentDelay
+                    let delay = max(0.1, currentDelay + jitter)
+                    CustomLogger.log("[ServerSession] Retry #\(index) in \(String(format: "%.2f", delay))s")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                        attempt(index + 1, currentDelay: nextDelay)
+                    }
+                } else {
+                    completion(data, response, error)
+                }
+            }
+            task.resume()
+        }
+        attempt(1, currentDelay: initialDelay)
     }
 
     func sendPayloadsJson(
@@ -227,26 +358,18 @@ class ServerSession {
                 CustomLogger.log("Error encoding combined JSON data: \(error)")
             }
 
-            let task = self.session.dataTask(with: request) {
-                data, response, error in
+            performRequestWithRetry(request, attempts: 4) { _, response, error in
                 if let error = error {
-                    CustomLogger.log(
-                        "Client error: \(error.localizedDescription)")
-                    return completion(
-                        "Client error: \(error.localizedDescription)")
+                    CustomLogger.log("Client error: \(error.localizedDescription)")
+                    return completion("Client error: \(error.localizedDescription)")
                 }
                 guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode)
-                else {
+                      (200...299).contains(httpResponse.statusCode) else {
                     CustomLogger.log("Server error")
-                    return completion(
-                        "Server error: \(String(describing: response))")
+                    return completion("Server error: \(String(describing: response))")
                 }
-                // CustomLogger.log("Sent")
                 return completion(nil)
             }
-            // CustomLogger.log("Sending")
-            task.resume()
         } else {
             return completion("Invalid URL: \(server)batch")
         }
@@ -280,26 +403,18 @@ class ServerSession {
                 CustomLogger.log("Error encoding combined Plist data: \(error)")
             }
 
-            let task = self.session.dataTask(with: request) {
-                data, response, error in
+            performRequestWithRetry(request, attempts: 4) { _, response, error in
                 if let error = error {
-                    CustomLogger.log(
-                        "Client error: \(error.localizedDescription)")
-                    return completion(
-                        "Client error: \(error.localizedDescription)")
+                    CustomLogger.log("Client error: \(error.localizedDescription)")
+                    return completion("Client error: \(error.localizedDescription)")
                 }
                 guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode)
-                else {
+                      (200...299).contains(httpResponse.statusCode) else {
                     CustomLogger.log("Server error")
-                    return completion(
-                        "Server error: \(String(describing: response))")
+                    return completion("Server error: \(String(describing: response))")
                 }
-                // CustomLogger.log("Sent")
                 return completion(nil)
             }
-            // CustomLogger.log("Sending")
-            task.resume()
         } else {
             return completion("Invalid URL: \(server)batch")
         }
@@ -321,21 +436,16 @@ class ServerSession {
             if let timeout = timeout {
                 request.timeoutInterval = timeout
             }
-            let task = self.session.dataTask(with: request) {
-                data, response, error in
+            performRequestWithRetry(request, attempts: 3) { _, response, error in
                 if let error = error {
-                    return completion(
-                        "Client error: \(error.localizedDescription)")
+                    return completion("Client error: \(error.localizedDescription)")
                 }
                 guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode)
-                else {
-                    return completion(
-                        "Server error: \(String(describing: response))")
+                      (200...299).contains(httpResponse.statusCode) else {
+                    return completion("Server error: \(String(describing: response))")
                 }
                 return completion(nil)
             }
-            task.resume()
         } else {
             return completion("Invalid URL: \(server)status/")
         }

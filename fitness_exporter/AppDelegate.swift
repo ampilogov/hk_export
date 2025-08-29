@@ -8,6 +8,7 @@
 import BackgroundTasks
 import OSLog
 import UIKit
+import UserNotifications
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
     static let BG_APP_REFRESH_IDENTIFIER =
@@ -75,6 +76,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         scheduleAppRefreshTask()
         scheduleProcessingTask()
 
+        UNUserNotificationCenter.current().delegate = self
+
         return true
     }
 
@@ -93,10 +96,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         exporter.run(
             sampleTypes: ExportConstants.getSampleTypesOfInterest(),
             batchSize: 60 * 60 * 24 * 3
-        ) {
-            status in
-            CustomLogger.log("[App] App refresh task finished: \(status ?? "nil")")
-            task.setTaskCompleted(success: true)
+        ) { status in
+            CustomLogger.log("[App] HK incremental export finished: \(status ?? "nil")")
+            DirectoryUploader.uploadAllFromStore(stopOnError: false) { fileStatus in
+                CustomLogger.log("[App] Background file upload finished: \(fileStatus ?? "nil")")
+                task.setTaskCompleted(success: true)
+            }
         }
     }
 
@@ -115,11 +120,26 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         exporter.run(
             sampleTypes: ExportConstants.getSampleTypesOfInterest(),
             batchSize: 60 * 60 * 24 * 10
-        ) {
-            status in
-            CustomLogger.log("[App] Processing task finished: \(status ?? "nil")")
-            task.setTaskCompleted(success: true)
+        ) { status in
+            CustomLogger.log("[App] HK processing export finished: \(status ?? "nil")")
+            DirectoryUploader.uploadAllFromStore(stopOnError: false) { fileStatus in
+                CustomLogger.log("[App] Background file upload finished: \(fileStatus ?? "nil")")
+                task.setTaskCompleted(success: true)
+            }
         }
     }
 
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        var options: UNNotificationPresentationOptions = [.alert, .sound, .badge]
+        if #available(iOS 14.0, *) {
+            options.insert([.banner, .list])
+        }
+        completionHandler(options)
+    }
 }
