@@ -105,30 +105,57 @@ struct HRVView: View {
     var body: some View {
         VStack(spacing: 16) {
             if connectionPhase == .notConnected {
-                if manager.isScanning {
-                    VStack(spacing: 8) {
-                        HStack {
-                            Button("Stop Scan") { manager.stopScan() }
-                            Spacer()
+                VStack(spacing: 12) {
+                    if !manager.rememberedDevices.isEmpty {
+                        VStack(spacing: 8) {
+                            HStack {
+                                Text("Remembered Devices")
+                                    .font(.headline)
+                                Spacer()
+                            }
+                            ScrollView {
+                                VStack(spacing: 8) {
+                                    ForEach(manager.rememberedDevices) { device in
+                                        HStack(spacing: 12) {
+                                            Text(device.name ?? device.id)
+                                            Spacer()
+                                            Button("Connect") {
+                                                manager.connect(to: device)
+                                            }
+                                            Button("Delete", role: .destructive) {
+                                                deleteRememberedDevice(device)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 160)
                         }
-                        ScrollView {
-                            VStack(spacing: 8) {
-                                ForEach(manager.discoveredDevices, id: \.identifier) { device in
-                                    HStack {
-                                        Text(device.name ?? device.identifier.uuidString)
-                                        Spacer()
-                                        Button("Connect") {
-                                            manager.connect(to: device)
-                                            connectionPhase = .connected
-                                            UserDefaults.standard.set(device.identifier.uuidString, forKey: UserDefaultsKeys.LAST_HRV_DEVICE)
+                    }
+
+                    if manager.isScanning {
+                        VStack(spacing: 8) {
+                            HStack {
+                                Button("Stop Scan") { manager.stopScan() }
+                                Spacer()
+                            }
+                            ScrollView {
+                                VStack(spacing: 8) {
+                                    ForEach(unrememberedDiscoveredDevices, id: \.identifier) { device in
+                                        HStack {
+                                            Text(device.name ?? device.identifier.uuidString)
+                                            Spacer()
+                                            Button("Connect") {
+                                                manager.connect(to: device)
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                    } else {
+                        Button("Scan Devices") { manager.scanForDevices() }
                     }
-                } else {
-                    Button("Scan Devices") { manager.scanForDevices() }
                 }
             } else if connectionPhase == .connected {
                 VStack(spacing: 8) {
@@ -280,6 +307,18 @@ struct HRVView: View {
                     eventBridge.resetGraph()
                 }
                 .store(in: &subscriptions)
+            manager.$isConnected
+                .receive(on: DispatchQueue.main)
+                .sink { connected in
+                    if connected {
+                        if connectionPhase == .notConnected {
+                            connectionPhase = .connected
+                        }
+                    } else if connectionPhase != .recording {
+                        connectionPhase = .notConnected
+                    }
+                }
+                .store(in: &subscriptions)
             manager.$discoveredDevices
                 .receive(on: DispatchQueue.main)
                 .sink { devices in
@@ -287,12 +326,18 @@ struct HRVView: View {
                     guard let lastUUID = UserDefaults.standard.string(forKey: UserDefaultsKeys.LAST_HRV_DEVICE) else { return }
                     if let device = devices.first(where: { $0.identifier.uuidString == lastUUID }) {
                         manager.connect(to: device)
-                        connectionPhase = .connected
                     }
                 }
                 .store(in: &subscriptions)
-            manager.autoScanOnPowerOn = true
-            manager.scanForDevices()
+            if let lastUUID = UserDefaults.standard.string(forKey: UserDefaultsKeys.LAST_HRV_DEVICE) {
+                let remembered =
+                    manager.rememberedDevices.first(where: { $0.id == lastUUID })
+                    ?? BluetoothManager.RememberedDevice(id: lastUUID, name: nil, lastSeen: .distantPast)
+                manager.connect(to: remembered)
+            } else {
+                manager.autoScanOnPowerOn = true
+                manager.scanForDevices()
+            }
         }
         .onDisappear {
             subscriptions.removeAll()
@@ -354,6 +399,22 @@ struct HRVView: View {
             return false
         }
     }
+
+    private var rememberedDeviceIDs: Set<String> {
+        Set(manager.rememberedDevices.map(\.id))
+    }
+
+    private var unrememberedDiscoveredDevices: [CBPeripheral] {
+        manager.discoveredDevices.filter { !rememberedDeviceIDs.contains($0.identifier.uuidString) }
+    }
+
+    private func deleteRememberedDevice(_ device: BluetoothManager.RememberedDevice) {
+        manager.forgetRememberedDevice(id: device.id)
+        if UserDefaults.standard.string(forKey: UserDefaultsKeys.LAST_HRV_DEVICE) == device.id {
+            UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.LAST_HRV_DEVICE)
+        }
+    }
+
     private func startRecording() {
         startDate = Date()
         elapsedSeconds = 0

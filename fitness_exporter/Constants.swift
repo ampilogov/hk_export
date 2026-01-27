@@ -6,6 +6,7 @@ enum UserDefaultsKeys {
     static let AUTO_SERVER_DISCOVERY_ENABLED = "autoServerDiscoveryEnabled"
     static let CUSTOM_LOGGER_LOGS = "CustomLoggerLogs"
     static let LAST_HRV_DEVICE = "lastHRVDeviceUUID"
+    static let HRV_REMEMBERED_DEVICES = "hrvRememberedDevices"
     static let HRV_LAYING_DURATION = "hrvLayingDuration"
     static let HRV_STANDING_DURATION = "hrvStandingDuration"
     static let HRV_WARMUP_DURATION = "hrvWarmupDuration"
