@@ -168,14 +168,16 @@ final class ContinuousRecorder: ObservableObject {
 
     private func flushCurrentBatch() {
         let bag = recorder.takeAndReset()
-        if let _ = try? SensorBagPersistence.save(bag, subdir: "continuous") {
-            // Write heartbeat series and HR directly from events
-            SensorBagPersistence.writeRRIntervalsToHealthKit(
-                from: bag, deviceName: manager.peripheral?.name
-            )
-            SensorBagPersistence.writeHeartRatesToHealthKit(
-                from: bag, deviceName: manager.peripheral?.name
-            )
+        if let fileURL = try? SensorBagPersistence.save(bag, subdir: "continuous") {
+            SensorBagPersistence.importSavedBagToHealthKit(
+                fileURL: fileURL,
+                profile: .continuous,
+                deviceName: manager.peripheral?.name
+            ) { result in
+                if case .failed(let message) = result {
+                    CustomLogger.log("[SensorBag][HK] Continuous import failed for \(fileURL.lastPathComponent): \(message)")
+                }
+            }
         }
     }
 

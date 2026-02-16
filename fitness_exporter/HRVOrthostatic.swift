@@ -128,29 +128,20 @@ class OrthostaticHRV: NSObject {
         do {
             let fileURL = try SensorBagPersistence.save(bag, subdir: "orthostatic")
             CustomLogger.log("Saved orthostatic data to \(fileURL.path)")
-            // Stage filtering here: only the laying window (laying -> waitingForStanding)
-            let events = bag.snapshot
-            var layingStart: Date?
-            var waitingStart: Date?
-            for e in events {
-                if case .hrvStage(let stage) = e.data {
-                    if stage == .laying {
-                        layingStart = e.timestamp
-                    } else if stage == .waitingForStanding {
-                        waitingStart = e.timestamp
-                    }
+            SensorBagPersistence.importSavedBagToHealthKit(
+                fileURL: fileURL,
+                profile: .orthostatic,
+                deviceName: manager.peripheral?.name
+            ) { result in
+                switch result {
+                case .imported, .alreadyPresent:
+                    CustomLogger.log("Wrote orthostatic data to HK")
+                case .noData:
+                    CustomLogger.log("Orthostatic bag had no HK-importable HR/RR data")
+                case .failed(let message):
+                    CustomLogger.log("[SensorBag][HK] Orthostatic import failed for \(fileURL.lastPathComponent): \(message)")
                 }
             }
-            SensorBagPersistence.writeHeartRatesToHealthKit(
-                from: events, deviceName: manager.peripheral?.name)
-            if let layStartRaw = layingStart, let layEndRaw = waitingStart {
-                let start = layStartRaw.addingTimeInterval(1)
-                let end = layEndRaw.addingTimeInterval(-1)
-                let filtered = events.filter { $0.timestamp >= start && $0.timestamp <= end }
-                SensorBagPersistence.writeRRIntervalsToHealthKit(
-                    from: filtered, deviceName: manager.peripheral?.name)
-            }
-            CustomLogger.log("Wrote orthostatic data to HK")
         } catch {
             CustomLogger.log("Failed to save orthostatic data: \(error)")
         }
