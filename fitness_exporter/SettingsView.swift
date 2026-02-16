@@ -9,6 +9,8 @@ struct SettingsView: View {
         var autoServerDiscovery: Bool =
             false
     @State private var bgRefreshCursorsText: String = ""
+    @State private var hkBackfillStatusText: String = ""
+    @State private var isHKBackfillRunning: Bool = false
 
     var body: some View {
         Form {
@@ -75,6 +77,27 @@ struct SettingsView: View {
                 .cornerRadius(8)
             }
 
+            Section(header: Text("SensorBag HealthKit")) {
+                Button(isHKBackfillRunning ? "Backfilling..." : "Backfill missing HK data") {
+                    runSensorBagBackfill()
+                }
+                .disabled(isHKBackfillRunning)
+                .font(.footnote)
+
+                Button("Reset backfill memory") {
+                    let removed = SensorBagPersistence.resetBackfillMemory()
+                    hkBackfillStatusText = "Reset backfill memory for \(removed) files."
+                }
+                .disabled(isHKBackfillRunning)
+                .font(.footnote)
+
+                if !hkBackfillStatusText.isEmpty {
+                    Text(hkBackfillStatusText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             Section(header: Text("Logs")) {
                 Button("Clear logs") {
                     CustomLogger.clearLogs()
@@ -84,6 +107,16 @@ struct SettingsView: View {
                 .foregroundColor(.white)
                 .cornerRadius(8)
             }
+        }
+    }
+
+    private func runSensorBagBackfill() {
+        isHKBackfillRunning = true
+        hkBackfillStatusText = "Scanning saved files..."
+        SensorBagPersistence.backfillSavedBagsToHealthKit { summary in
+            isHKBackfillRunning = false
+            hkBackfillStatusText =
+                "Total \(summary.totalFiles), pending \(summary.pendingFiles), skipped \(summary.skippedByMemoryFiles), imported \(summary.importedFiles), unchanged \(summary.unchangedFiles), failed \(summary.failedFiles)."
         }
     }
 

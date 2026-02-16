@@ -633,7 +633,16 @@ struct HRVView: View {
                     } else {
                         CustomLogger.log("[HRV][IE][Success] Completed incremental export at test start")
                     }
+                    kickOffSensorBagBackfill()
                 }
+            }
+        }
+
+        private func kickOffSensorBagBackfill() {
+            SensorBagPersistence.backfillSavedBagsToHealthKit(onlyPending: true) { summary in
+                CustomLogger.log(
+                    "[HRV][Backfill] total=\(summary.totalFiles) pending=\(summary.pendingFiles) skipped=\(summary.skippedByMemoryFiles) imported=\(summary.importedFiles) unchanged=\(summary.unchangedFiles) failed=\(summary.failedFiles)"
+                )
             }
         }
 
