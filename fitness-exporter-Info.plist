@@ -28,6 +28,18 @@
 	</array>
 	<key>NSHealthClinicalHealthRecordsShareUsageDescription</key>
 	<string>This app uses your clinical health records to provide personalized health insights and recommendations.</string>
+	<key>NSHealthRequiredReadAuthorizationTypeIdentifiers</key>
+	<array>
+		<string>HKClinicalTypeIdentifierAllergyRecord</string>
+		<string>HKClinicalTypeIdentifierClinicalNoteRecord</string>
+		<string>HKClinicalTypeIdentifierConditionRecord</string>
+		<string>HKClinicalTypeIdentifierImmunizationRecord</string>
+		<string>HKClinicalTypeIdentifierLabResultRecord</string>
+		<string>HKClinicalTypeIdentifierMedicationRecord</string>
+		<string>HKClinicalTypeIdentifierProcedureRecord</string>
+		<string>HKClinicalTypeIdentifierVitalSignRecord</string>
+		<string>HKClinicalTypeIdentifierCoverageRecord</string>
+	</array>
 	<key>NSHealthShareUsageDescription</key>
 	<string>We use HealthKit data to provide insights in the app.</string>
 </dict>

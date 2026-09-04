@@ -132,8 +132,12 @@ struct DateRangeExporterView: View {
         HealthKitManager.initialize(startObservers: false) {
             success in
             if !success {
-                alertMessage = "HK Store initialization failed, see logs"
-                showAlert = true
+                DispatchQueue.main.async {
+                    alertMessage =
+                        HealthKitManager.authorizationErrorMessage
+                        ?? "HealthKit authorization failed."
+                    showAlert = true
+                }
                 return
             }
 
@@ -150,8 +154,12 @@ struct DateRangeExporterView: View {
         HealthKitManager.initialize(startObservers: false) {
             success in
             if !success {
-                alertMessage = "HK Store initialization failed, see logs"
-                showAlert = true
+                DispatchQueue.main.async {
+                    alertMessage =
+                        HealthKitManager.authorizationErrorMessage
+                        ?? "HealthKit authorization failed."
+                    showAlert = true
+                }
                 return
             }
 

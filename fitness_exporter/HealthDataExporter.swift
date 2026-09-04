@@ -1058,6 +1058,8 @@ class HealthDataExporter {
 }
 
 class HealthKitManager {
+    static private(set) var authorizationErrorMessage: String?
+
     // Unified sets of permissions used across the app
     private static func unifiedReadTypes() -> Set<HKObjectType> {
         return Set(ExportConstants.getSampleTypesOfInterest().map { $0 as HKObjectType })
@@ -1081,23 +1083,46 @@ class HealthKitManager {
         startObservers: Bool,
         completion: @escaping (Bool) -> Void
     ) {
+        authorizationErrorMessage = nil
+
         guard HKHealthStore.isHealthDataAvailable() else {
-            CustomLogger.log("[HKM][Error] Health data is not available.")
+            let message = "Health data is not available on this device."
+            authorizationErrorMessage = message
+            CustomLogger.log("[HKM][Error] \(message)")
             return completion(false)
         }
 
         let healthStore = HKHealthStore()
+        guard healthStore.supportsHealthRecords() else {
+            let message = "Clinical Health Records are not supported on this device."
+            authorizationErrorMessage = message
+            CustomLogger.log("[HKM][Error] \(message)")
+            return completion(false)
+        }
+
         let readTypes = unifiedReadTypes()
         let shareTypes = unifiedShareTypes()
 
         healthStore.requestAuthorization(toShare: shareTypes, read: readTypes) {
             okay, error in
             if let error = error {
+                if let healthError = error as? HKError,
+                    healthError.code == .errorRequiredAuthorizationDenied
+                {
+                    authorizationErrorMessage =
+                        "Clinical Health Records permission was denied. "
+                        + "Enable all requested clinical record categories in Health settings, then try again."
+                } else {
+                    authorizationErrorMessage =
+                        "HealthKit authorization failed: \(error.localizedDescription)"
+                }
                 CustomLogger.log("[HKM][Error] Error requesting authorization: \(error)")
                 return completion(false)
             }
             if !okay {
-                CustomLogger.log("[HKM][Error] Don't have permissions")
+                let message = "HealthKit did not authorize the requested data access."
+                authorizationErrorMessage = message
+                CustomLogger.log("[HKM][Error] \(message)")
                 return completion(false)
             }
             if startObservers {
