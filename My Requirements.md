@@ -21,6 +21,10 @@ Completed items are removed from this active tracker instead of accumulating und
 - A pipeline failure should be explicit and retryable rather than an intentional process crash. Raw recording may continue when its data is already durable and only a downstream HealthKit/upload stage failed; the failed downstream stage must remain pending.
 - Automatic retries must be bounded and visible. Never convert failure into success merely because all remaining items were traversed.
 
+## Platform compatibility
+
+- Only the latest iOS release needs to be supported. New work may use current iOS APIs directly and does not need compatibility branches or fallback behavior for older iOS versions.
+
 ## Requirements
 
 ### R1 — Measure and reduce battery drain
@@ -29,7 +33,7 @@ Determine how much battery continuous recording consumes on both the iPhone and 
 
 All currently captured HR/RR, ECG, and ACC data is required for offline server analysis. R1 must not disable a stream, reduce its sampling rate, discard samples, or otherwise trade data completeness for battery life.
 
-**Status:** In progress — lightweight diagnostics and first low-risk optimizations implemented; first field run analyzed, valid unplugged battery comparison pending
+**Status:** In progress — agreed low-risk implementation is locally verified; one basic H10 sanity recording and a normal-use unplugged battery observation remain
 
 ### R2 — Prevent and diagnose crashes
 
@@ -69,7 +73,7 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 
 ## Recommended implementation order
 
-1. **R1 — Energy and stream lifecycle.** Continue collecting normal-use evidence and address remaining high-confidence energy defects without requiring a dedicated long profiling campaign.
+1. **R1 — Energy and stream lifecycle.** Complete one basic H10 sanity recording, then collect battery evidence during normal use rather than a dedicated profiling campaign.
 2. **R2 and R5 — Long-run stability and independent failure notification.** Diagnose the reported approximately 12-hour termination and add a low-frequency dead-man alert that survives the app process.
 3. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then change the future file format and upload pipeline.
 4. **R4 — Reconnection and recording resume.** Build this around the same health state and escalation rules used by R5.
@@ -80,8 +84,8 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
-| R1 | Battery drain | In progress | Use the instrumented build normally and review an unplugged recording when convenient; no dedicated long profiling run required |
-| R2 | Crash prevention and diagnostics | In progress | Add post-termination diagnostics, remove known long-running background-task misuse, and reproduce with a 12-hour soak |
+| R1 | Battery drain | In progress | Run one basic H10 sanity recording; then observe battery during normal unplugged use when convenient |
+| R2 | Crash prevention and diagnostics | In progress | Add post-termination diagnostics and reproduce or classify the failure with a 12-hour soak |
 | R3 | File and upload efficiency | Proposed | Design one durable upload coordinator and background transfer queue |
 | R4 | Auto reconnect and resume | Proposed | Define and test the recording connection state machine |
 | R5 | Notification behavior | Ready | Add a rolling local dead-man notification and stale Live Activity state; verify delivery on the paired Apple Watch |
@@ -92,69 +96,26 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 
 ### R1 considerations — Battery drain
 
-Current observations:
+Current considerations:
 
-- **Observed usage:** continuous recording normally remains active for approximately 24 hours, the screen is normally off, and the H10 is explicitly disconnected after Stop. The user does not leave the device connected while idle. Therefore, post-recording streaming and a lit display are correctness concerns but are unlikely explanations for the reported battery drain.
-- The earlier once-daily morning HRV workflow did not cause noticeable battery drain. The relevant difference is sustained 24-hour acquisition plus the repeated persistence, HealthKit, indexing, and upload work that accompanies it.
-- **Lower priority for this usage, but still a defect:** connecting the device starts HR, ECG, and ACC immediately, before the user starts a recording. Stopping a recording does not itself dispose the Polar SDK's raw-stream subscriptions, although the user's explicit disconnect does terminate the session.
-- The H10 ECG rate is fixed at 130 Hz, so the call to `maxSettings()` is not raising it beyond the device's supported rate. ACC is already selected at its minimum supported sample rate, 25 Hz. The avoidable issue is when these streams run, not an unusually high configured H10 rate.
-- **Lower priority for this usage, but still a defect:** opening the HRV tab disables automatic screen sleep. Because the screen is normally turned off and the app is seldom reopened during a recording, this is unlikely to explain the reported background drain.
-- Every HR, ECG, and ACC packet is delivered and mapped on the main thread. Each packet also publishes UI state and starts a new asynchronous Live Activity update, producing several tasks per second throughout a long connection.
-- With the actual five-minute duration and five-minute interval, the implementation computes `max(0, interval - duration)`, so the off-window is zero seconds and the next write window starts immediately. This is nonstop recording, as intended.
-- A UIKit background task is held for the complete recording with no expiration handler. This is not a supported way to keep an iOS app alive indefinitely and can contribute to system termination.
-- The raw compact binary payload is probably not the principal sustained cost. The expensive lifecycle around every file includes serialization, rereading, decoding, hashing, HealthKit authorization and writes, and rereading/re-encoding the complete HealthKit JSON index.
+- The real workflow is approximately 24 hours of continuous recording with the display normally off, followed by Stop and an explicit H10 disconnect. The earlier once-daily morning HRV workflow did not cause noticeable drain.
+- Every currently captured HR/RR, ECG, and ACC sample is required. The sampling configuration, compact binary format, five-minute cadence, and downstream server data must remain unchanged.
+- Five-minute packages still create 288 files and HealthKit write jobs per day. Reducing the permanent file count and redesigning upload scheduling belong to R3 so that R1 does not mix a storage migration into the low-risk energy changes.
+- Continuous 130 Hz ECG and 25 Hz ACC have an unavoidable device and phone cost. H10 battery reporting is coarse, so meaningful H10 comparisons are best collected during normal long recordings.
+- The earlier 53-minute field run occurred while the phone was charging and cannot establish battery consumption. No dedicated Power Profiler session is required before using this build.
 
-The continuous controls reuse duration choices intended for short tests. When duration and interval are equal, the current timer creates this many files and independent HealthKit import jobs:
+Remaining work:
 
-| Duration and interval | Files/import jobs per day |
-| --- | ---: |
-| 0 seconds | Unbounded hot timer loop; saves may fail silently |
-| 2 seconds | 43,200 |
-| 5 seconds | 17,280 |
-| 10 seconds | 8,640 |
-| 30 seconds | 2,880 |
-| 5 minutes (current default) | 288 |
-
-The configured five-minute cadence is reasonable as a durability or upload checkpoint. It is inefficient in the current architecture because it creates 288 permanent files and 288 independent HealthKit jobs per day—approximately 8,640 of each in a 30-day month. Imports have no single in-flight gate, and completion of each one reloads and rewrites the full HealthKit backfill index. With a large collection, this becomes effectively quadratic cumulative work. It is a strong candidate for battery drain, hangs, and memory or watchdog terminations. The zero-second choice remains an unrelated edge-case defect because it can create a tight timer loop and save errors are ignored.
-
-Current suspected-drain ranking:
-
-1. Per-packet main-thread mapping/publication and unthrottled Live Activity updates sustained for 24 hours.
-2. The five-minute file lifecycle: 288 daily serialization/read/decode/hash/HealthKit jobs plus full-index rewrites.
-3. Upload scan, retry, and logging storms when a large backlog exists or the server is unreachable.
-4. Expected H10 cost of continuous 130 Hz ECG and 25 Hz ACC acquisition; measure this separately from avoidable app overhead.
-5. The session-long UIKit background assertion and competing background work.
-6. Post-Stop streaming and forced screen wakefulness are lower-priority explanations under the documented usage pattern.
-
-Proposed approach:
-
-- Make Polar stream subscriptions recording- and profile-scoped. Start only the requested streams, retain a separately disposable handle for each stream, and explicitly stop them before disconnect or recording completion.
-- Use one authoritative Bluetooth/Polar connection owner. The current outer CoreBluetooth central connects first and then the Polar SDK creates its own central and connection, producing redundant ownership and conflicting connection state.
-- Remove the session-long UIKit background assertion. Use Bluetooth background delivery plus short, expiration-safe assertions only while finalizing durable data.
-- Separate the five-minute durability/upload checkpoint from permanent file rotation. Append through one serialized writer, make each five-minute checkpoint eligible for immediate transfer, and rotate permanent local storage into hourly segments rather than creating one independent HealthKit/import transaction per checkpoint.
-- Move serialization and indexing off the main thread. Serialize HealthKit work through a bounded queue and update one transactional index in batches.
-- Add explicit recording profiles. ACC should be opt-in. Historical ECG requires ECG to be captured continuously; an RR-only profile can only start ECG prospectively after the user requests it.
-- Limit visible status updates to roughly once per second and Live Activity updates to state changes or approximately every 15–30 seconds.
-- Allow the screen to sleep during continuous recording.
-- Measure the actual 24-hour, screen-off workflow first, then isolate `recording only`, `recording + HealthKit`, and `recording + immediate upload` variants. Compare `RR only`, `RR + ECG`, and `RR + ECG + ACC` separately, and use long H10 runs because its reported battery percentage is coarse.
-- Record iPhone energy impact, CPU, memory, disk writes, wakeups, packets, bytes, file finalization latency, HealthKit queue depth, and upload activity. Record H10 battery separately.
-
-Measurement status:
-
-- Static code and dependency audit completed on September 3, 2026.
-- Lightweight in-app diagnostics now count packets and samples, file-write timing/bytes/backlog, HealthKit timing/backlog/results, disconnects, Live Activity requests suppressed/performed, and starting/latest iPhone and H10 battery levels. The latest compact JSON report is updated at recording checkpoints and can be shared from the HRV screen.
-- UI timestamp publication is capped at 1 Hz, Live Activity requests at one every 30 seconds, package serialization runs on a serial utility queue instead of the main thread, and continuous-package HealthKit imports are limited to one in flight.
-- The first approximately 53-minute physical-device run completed 11 of 11 raw file writes. Ten of 11 live HealthKit imports failed while protected HealthKit data was inaccessible, exposing repeated authorization/query/import work in the five-minute path. The phone charged from 75% to 85% during the run, so it cannot serve as a battery-consumption baseline.
-- A physical Power Profiler trace has not been captured. Precise battery-per-hour conclusions still require a locked, unplugged, same-device comparison, but this can be gathered during normal use rather than through another dedicated long profiling session.
-- The project currently pins Polar BLE SDK 6.4.0. Later 6.x and 8.x releases contain crash and streaming-lifecycle changes, but an upgrade should be evaluated as a controlled soak-test experiment rather than assumed to fix energy use.
+1. Run one short H10 sanity recording and confirm that RR, ECG, and ACC timestamps advance, stopping produces a normal recording file, and no new error appears.
+2. Use the build normally with the phone unplugged and screen off. Compare the saved start/end battery values when a convenient run is available; this does not need to delay ordinary use.
+3. Reopen the implementation only if the sanity recording shows a data regression or normal-use diagnostics still show unexpectedly high app overhead.
 
 Acceptance criteria:
 
-- Battery consumption is reported separately for every supported capture profile.
-- Memory remains bounded throughout a long recording.
-- No sensor stream runs before recording, after Stop, or while it is disabled by the active profile.
-- Selecting zero or an unsafe short continuous window cannot create a hot loop or thousands of file/import transactions.
-- Optimization results are compared against the recorded baseline before changing defaults.
+- RR, ECG, and ACC remain present at their existing sampling rates with no intentional sample loss.
+- Five-minute file rotation, binary compatibility, HealthKit writes, post-Stop incremental export, and upload behavior do not regress.
+- The app starts normally and a short physical recording completes without a new error.
+- An unplugged normal-use observation is available before making any stronger claim about battery savings.
 
 Evidence references:
 
@@ -168,7 +129,6 @@ Evidence references:
 Current observations:
 
 - The app reportedly terminates silently after roughly 12 hours of continuous recording. The user normally discovers this only after unlocking the phone. No crash, Jetsam, watchdog, or hang artifact has yet identified the cause.
-- A UIKit background task is opened for the entire recording and has no expiration handler. Background tasks are finite; failing to end one before expiration can cause iOS to terminate the app.
 - **Lower-priority durability risk:** current recording data lives in memory until the five-minute window is serialized, so a crash can lose the unfinished window. Completed `.bin` files remain available to the existing HealthKit backfill and do not require a more elaborate recovery design now.
 - Some HealthKit export paths use `fatalError` for unexpected data, and the RR graph assumes ordered timestamps and non-zero plot ranges. These remain possible crash paths to harden if termination evidence implicates them.
 - Large directory scans and HealthKit index work can run from the main thread, creating watchdog risk.
@@ -176,7 +136,6 @@ Current observations:
 
 Proposed approach:
 
-- Remove the session-long background task. Use short, balanced, expiration-safe tasks only around critical file finalization.
 - Defer unfinished-window crash protection until the higher-priority crash and battery work is understood. If implemented, prefer checkpointing or appending to one active local staging file rather than shortening the permanent file-rotation interval or creating many additional files. Measure disk activity, battery impact, and any backup/iCloud synchronization activity before enabling it by default.
 - Persist a lightweight active-session journal containing the session ID, selected device and streams, start time, last sensor packet, and last successful disk write.
 - Add MetricKit reporting and preserve symbolicated build archives. Detect an unfinished journal on launch and report that the previous recording ended unexpectedly.
@@ -187,7 +146,6 @@ Proposed approach:
 
 Acceptance criteria:
 
-- No background task remains open for the lifetime of a recording.
 - Force-terminating the app leaves a readable file with only a small, explicitly bounded tail at risk.
 - Any reduction in the crash-loss window must not materially increase battery drain or create an iCloud/file-synchronization storm.
 - The next launch identifies an interrupted recording and preserves relevant diagnostic context.

@@ -193,52 +193,73 @@ extension SensorBag {
 }
 
 /// Records events from a manager into a SensorBag.
-class SensorBagRecorder: ObservableObject {
+final class SensorBagRecorder {
     private var cancellables = Set<AnyCancellable>()
-    @Published private(set) var bag = SensorBag()
-    @Published private(set) var isRecording = false
+    private let stateLock = NSLock()
+    private var bag = SensorBag()
+    private var isRecording = false
 
     func start(with manager: BluetoothManager) {
         guard !isRecording else { return }
         isRecording = true
         manager.sensorPublisher
             .sink { [weak self] event in
-                self?.bag.addEvent(event)
+                self?.record(event)
             }
             .store(in: &cancellables)
     }
 
     func stop() -> SensorBag {
-        guard isRecording else { return bag }
-        isRecording = false
-        cancellables.removeAll()
-        return bag
+        if isRecording {
+            isRecording = false
+            cancellables.removeAll()
+        }
+        return currentBag()
     }
 
     func reset() {
+        stateLock.lock()
         bag = SensorBag()
+        stateLock.unlock()
+    }
+
+    /// Append one event supplied by an externally managed subscription.
+    /// The lock keeps appends ordered with bag swaps at file boundaries.
+    func record(_ event: SensorEvent) {
+        stateLock.lock()
+        bag.addEvent(event)
+        stateLock.unlock()
     }
 
     /// Atomically return the current bag and replace it with a fresh one
     /// without interrupting the recording subscription.
     func takeAndReset() -> SensorBag {
+        stateLock.lock()
         let current = bag
         bag = SensorBag()
+        stateLock.unlock()
         return current
     }
 
     func markHRVProtocolStage(_ stage: HRVStage, at timestamp: Date = Date()) {
         let event = SensorEvent(timestamp: timestamp, data: .hrvStage(stage))
-        bag.addEvent(event)
+        record(event)
     }
 
     func recordLocation(_ sample: LocationSample, at timestamp: Date = Date()) {
         let event = SensorEvent(timestamp: timestamp, data: .location(sample))
-        bag.addEvent(event)
+        record(event)
     }
 
     func markCustomEvent(_ message: String, at timestamp: Date = Date()) {
         let event = SensorEvent(timestamp: timestamp, data: .custom(message))
-        bag.addEvent(event)
+        record(event)
+    }
+
+    private func currentBag() -> SensorBag {
+        stateLock.lock()
+        let current = bag
+        stateLock.unlock()
+        return current
     }
 }

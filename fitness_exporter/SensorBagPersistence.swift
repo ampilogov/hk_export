@@ -16,6 +16,15 @@ enum SensorBagPersistence {
         case failed(String)
     }
 
+    enum ImportMode {
+        /// The caller just created this file and has not attempted its import.
+        /// Deterministic sync metadata is written without querying HealthKit.
+        case newFile
+        /// The file may have been imported fully or partially in an earlier run.
+        /// HealthKit is queried before retrying any object.
+        case recovery
+    }
+
     struct BackfillSummary {
         let totalFiles: Int
         let pendingFiles: Int
@@ -64,6 +73,7 @@ enum SensorBagPersistence {
     /// Import one previously-saved SensorBag file into HealthKit using idempotent sync identifiers.
     static func importSavedBagToHealthKit(
         fileURL: URL, profile: Profile, deviceName: String?,
+        mode: ImportMode = .recovery,
         completion: ((ImportResult) -> Void)? = nil
     ) {
         func finish(_ result: ImportResult) {
@@ -140,7 +150,8 @@ enum SensorBagPersistence {
                             hrPoints,
                             deviceName: deviceName,
                             store: store,
-                            syncIdentifier: hrSyncIdentifier
+                            syncIdentifier: hrSyncIdentifier,
+                            mode: mode
                         ) { result in
                             appendResult(result)
                             group.leave()
@@ -153,7 +164,8 @@ enum SensorBagPersistence {
                             beats,
                             deviceName: deviceName,
                             store: store,
-                            syncIdentifierPrefix: rrSyncPrefix
+                            syncIdentifierPrefix: rrSyncPrefix,
+                            mode: mode
                         ) { result in
                             appendResult(result)
                             group.leave()
@@ -290,6 +302,7 @@ enum SensorBagPersistence {
                 deviceName: deviceName,
                 store: store,
                 syncIdentifierPrefix: syncIdentifierPrefix,
+                mode: .recovery,
                 completion: completion
             )
         }
@@ -317,6 +330,7 @@ enum SensorBagPersistence {
                 deviceName: deviceName,
                 store: store,
                 syncIdentifier: syncIdentifier,
+                mode: .recovery,
                 completion: completion
             )
         }
@@ -501,6 +515,7 @@ enum SensorBagPersistence {
         deviceName: String?,
         store: HKHealthStore,
         syncIdentifierPrefix: String?,
+        mode: ImportMode,
         completion: ((ImportResult) -> Void)?
     ) {
         guard !beats.isEmpty else {
@@ -560,31 +575,54 @@ enum SensorBagPersistence {
                 }
             }
 
-            if let syncIdentifier = pageSyncIdentifier {
-                hasSample(
-                    withSyncIdentifier: syncIdentifier,
-                    sampleType: heartbeatType,
+            func checkLegacyThenWrite() {
+                hasLegacyHeartbeatSeries(
+                    page: page,
+                    deviceName: deviceName,
                     store: store
-                ) { exists in
-                    if exists {
+                ) { result in
+                    switch result {
+                    case .success(true):
                         processPage(idx + 1)
-                        return
-                    }
-                    hasLegacyHeartbeatSeries(page: page, deviceName: deviceName, store: store) { legacyExists in
-                        if legacyExists {
-                            processPage(idx + 1)
-                        } else {
-                            writePage()
-                        }
+                    case .success(false):
+                        writePage()
+                    case .failure(let error):
+                        completion?(
+                            .failed(
+                                "Can't check legacy heartbeat series: "
+                                    + error.localizedDescription
+                            )
+                        )
                     }
                 }
-            } else {
-                hasLegacyHeartbeatSeries(page: page, deviceName: deviceName, store: store) { legacyExists in
-                    if legacyExists {
-                        processPage(idx + 1)
-                    } else {
-                        writePage()
+            }
+
+            switch mode {
+            case .newFile:
+                writePage()
+            case .recovery:
+                if let syncIdentifier = pageSyncIdentifier {
+                    hasSample(
+                        withSyncIdentifier: syncIdentifier,
+                        sampleType: heartbeatType,
+                        store: store
+                    ) { result in
+                        switch result {
+                        case .success(true):
+                            processPage(idx + 1)
+                        case .success(false):
+                            checkLegacyThenWrite()
+                        case .failure(let error):
+                            completion?(
+                                .failed(
+                                    "Can't check heartbeat sync identifier: "
+                                        + error.localizedDescription
+                                )
+                            )
+                        }
                     }
+                } else {
+                    checkLegacyThenWrite()
                 }
             }
         }
@@ -597,6 +635,7 @@ enum SensorBagPersistence {
         deviceName: String?,
         store: HKHealthStore,
         syncIdentifier: String?,
+        mode: ImportMode,
         completion: ((ImportResult) -> Void)?
     ) {
         guard let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate) else {
@@ -647,29 +686,54 @@ enum SensorBagPersistence {
         }
 
         func checkLegacyThenWrite() {
-            hasLegacyHeartRateSeries(points: sorted, deviceName: deviceName, store: store) { legacyExists in
-                if legacyExists {
+            hasLegacyHeartRateSeries(
+                points: sorted,
+                deviceName: deviceName,
+                store: store
+            ) { result in
+                switch result {
+                case .success(true):
                     completion?(.alreadyPresent)
-                } else {
+                case .success(false):
                     writeSeries()
+                case .failure(let error):
+                    completion?(
+                        .failed(
+                            "Can't check legacy heart-rate series: "
+                                + error.localizedDescription
+                        )
+                    )
                 }
             }
         }
 
-        if let syncIdentifier {
-            hasSample(
-                withSyncIdentifier: syncIdentifier,
-                sampleType: hrType,
-                store: store
-            ) { exists in
-                if exists {
-                    completion?(.alreadyPresent)
-                } else {
-                    checkLegacyThenWrite()
+        switch mode {
+        case .newFile:
+            writeSeries()
+        case .recovery:
+            if let syncIdentifier {
+                hasSample(
+                    withSyncIdentifier: syncIdentifier,
+                    sampleType: hrType,
+                    store: store
+                ) { result in
+                    switch result {
+                    case .success(true):
+                        completion?(.alreadyPresent)
+                    case .success(false):
+                        checkLegacyThenWrite()
+                    case .failure(let error):
+                        completion?(
+                            .failed(
+                                "Can't check heart-rate sync identifier: "
+                                    + error.localizedDescription
+                            )
+                        )
+                    }
                 }
+            } else {
+                checkLegacyThenWrite()
             }
-        } else {
-            checkLegacyThenWrite()
         }
     }
 
@@ -738,7 +802,7 @@ enum SensorBagPersistence {
         withSyncIdentifier syncIdentifier: String,
         sampleType: HKSampleType,
         store: HKHealthStore,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Result<Bool, Error>) -> Void
     ) {
         let predicate = HKQuery.predicateForObjects(
             withMetadataKey: HKMetadataKeySyncIdentifier,
@@ -749,10 +813,10 @@ enum SensorBagPersistence {
             _, samples, error in
             if let error {
                 CustomLogger.log("[SensorBag][HK] metadata existence check failed: \(error.localizedDescription)")
-                completion(false)
+                completion(.failure(error))
                 return
             }
-            completion(!(samples?.isEmpty ?? true))
+            completion(.success(!(samples?.isEmpty ?? true)))
         }
         store.execute(query)
     }
@@ -761,14 +825,14 @@ enum SensorBagPersistence {
         points: [(Date, Double)],
         deviceName: String?,
         store: HKHealthStore,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Result<Bool, Error>) -> Void
     ) {
         guard
             let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate),
             let start = points.first?.0,
             let end = points.last?.0
         else {
-            completion(false)
+            completion(.success(false))
             return
         }
         let predicate = HKQuery.predicateForSamples(
@@ -777,7 +841,11 @@ enum SensorBagPersistence {
             options: []
         )
         let query = HKSampleQuery(sampleType: hrType, predicate: predicate, limit: 50, sortDescriptors: nil) {
-            _, samples, _ in
+            _, samples, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
             let expectedCount = points.count
             let bundleIdentifier = Bundle.main.bundleIdentifier
             let exists = (samples as? [HKQuantitySample])?.contains { sample in
@@ -790,7 +858,7 @@ enum SensorBagPersistence {
                     && abs(sample.startDate.timeIntervalSince(start)) < 1
                     && abs(sample.endDate.timeIntervalSince(end)) < 1
             } ?? false
-            completion(exists)
+            completion(.success(exists))
         }
         store.execute(query)
     }
@@ -799,10 +867,10 @@ enum SensorBagPersistence {
         page: [(Date, Bool)],
         deviceName: String?,
         store: HKHealthStore,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Result<Bool, Error>) -> Void
     ) {
         guard let start = page.first?.0, let end = page.last?.0 else {
-            completion(false)
+            completion(.success(false))
             return
         }
         let predicate = HKQuery.predicateForSamples(
@@ -815,7 +883,11 @@ enum SensorBagPersistence {
             predicate: predicate,
             limit: 50,
             sortDescriptors: nil
-        ) { _, samples, _ in
+        ) { _, samples, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
             let expectedCount = page.count
             let bundleIdentifier = Bundle.main.bundleIdentifier
             let exists = (samples as? [HKHeartbeatSeriesSample])?.contains { sample in
@@ -828,7 +900,7 @@ enum SensorBagPersistence {
                     && abs(sample.startDate.timeIntervalSince(start)) < 1
                     && abs(sample.endDate.timeIntervalSince(end)) < 1
             } ?? false
-            completion(exists)
+            completion(.success(exists))
         }
         store.execute(query)
     }

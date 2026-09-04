@@ -38,6 +38,7 @@ private struct ContinuousRecordingDiagnostics: Codable {
     var bytesWritten: Int64 = 0
     var totalFileWriteMilliseconds: Int64 = 0
     var maximumFileWriteMilliseconds: Int64 = 0
+    var fileFinalizationExpirationCount = 0
     var healthKitEnqueuedCount = 0
     var healthKitCompletedCount = 0
     var healthKitImportedCount = 0
@@ -50,6 +51,20 @@ private struct ContinuousRecordingDiagnostics: Codable {
     var generatedAt: Date
 }
 
+private final class BackgroundTaskToken {
+    var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    func end() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [self] in self.end() }
+            return
+        }
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+
 /// Handles periodic recording of raw sensor data and updates a Live Activity
 /// with the latest reception timestamps for RR/ECG/ACC streams.
 final class ContinuousRecorder: ObservableObject {
@@ -60,11 +75,46 @@ final class ContinuousRecorder: ObservableObject {
         let enqueuedAt: Date
     }
 
+    private struct IngestionState {
+        var sessionID: String?
+        var lastRR: Date?
+        var lastECG: Date?
+        var lastACC: Date?
+        var h10BatteryPercent: Int?
+        var hrPacketCount = 0
+        var hrSampleCount = 0
+        var rrIntervalCount = 0
+        var ecgPacketCount = 0
+        var ecgSampleCount = 0
+        var accPacketCount = 0
+        var accSampleCount = 0
+        var uiPublishScheduled = false
+    }
+
+    private struct IngestionSnapshot {
+        let sessionID: String
+        let lastRR: Date?
+        let lastECG: Date?
+        let lastACC: Date?
+        let h10BatteryPercent: Int?
+        let hrPacketCount: Int
+        let hrSampleCount: Int
+        let rrIntervalCount: Int
+        let ecgPacketCount: Int
+        let ecgSampleCount: Int
+        let accPacketCount: Int
+        let accSampleCount: Int
+    }
+
     private static let liveActivityMinimumUpdateInterval: TimeInterval = 30
     private static let uiTimestampMinimumUpdateInterval: TimeInterval = 1
 
     private let manager: BluetoothManager
     private let recorder = SensorBagRecorder()
+    private let ingestionQueue = DispatchQueue(
+        label: "com.fitness_exporter.continuousIngestion",
+        qos: .utility
+    )
     private let fileWriteQueue = DispatchQueue(
         label: "com.fitness_exporter.continuousFileWriter",
         qos: .utility
@@ -77,7 +127,6 @@ final class ContinuousRecorder: ObservableObject {
     /// Drives switching between write-on and write-off windows
     private var sessionTimer: Timer?
     private var staleTimer: Timer?
-    private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var activity: Activity<ContinuousRecordingAttributes>?
     private var activityStateTask: Task<Void, Never>?
     private var isRunning = false
@@ -93,6 +142,9 @@ final class ContinuousRecorder: ObservableObject {
     private var healthKitImports: [PendingHealthKitImport] = []
     private var healthKitImportInFlight = false
     private var wasBatteryMonitoringEnabled = false
+    private var ingestionState = IngestionState()
+    private var uiPublishWorkItem: DispatchWorkItem?
+    private var discardBufferedEventsAtNextWindowStart = false
 
     /// Last reception timestamps for each sensor stream.
     @Published var lastRR: Date?
@@ -124,6 +176,13 @@ final class ContinuousRecorder: ObservableObject {
 
     /// Stop timers and continuous capture. Optionally flush current write window.
     func stop() {
+        guard isRunning else { return }
+        manager.drainPendingSensorEvents()
+        let finalSnapshot = drainIngestion(cancelScheduledPublish: true)
+        subscriptions.removeAll()
+        if let finalSnapshot {
+            applyIngestionSnapshot(finalSnapshot, requireRunning: false)
+        }
         isRunning = false
         sessionTimer?.invalidate()
         sessionTimer = nil
@@ -147,22 +206,17 @@ final class ContinuousRecorder: ObservableObject {
         lastECGReceivedAt = nil
         lastACCReceivedAt = nil
         lastLiveActivityUpdateAt = nil
-        startDiagnostics(at: start)
+        let sessionID = startDiagnostics(at: start)
         recorder.reset()
-        recorder.start(with: manager)
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "ContinuousRecording")
-        subscribe()
+        resetIngestion(for: sessionID)
+        discardBufferedEventsAtNextWindowStart = false
+        subscribe(sessionID: sessionID)
         startLiveActivityIfNeeded()
         startStaleTimer()
     }
 
     private func endContinuousCapture() {
         subscriptions.removeAll()
-        let _ = recorder.stop()
-        if bgTask != .invalid {
-            UIApplication.shared.endBackgroundTask(bgTask)
-            bgTask = .invalid
-        }
         endLiveActivity()
         stopDiagnostics()
     }
@@ -190,48 +244,12 @@ final class ContinuousRecorder: ObservableObject {
         }
     }
 
-    private func subscribe() {
+    private func subscribe(sessionID: String) {
         subscriptions.removeAll()
         manager.sensorPublisher
-            .receive(on: DispatchQueue.main)
+            .receive(on: ingestionQueue)
             .sink { [weak self] event in
-                guard let self = self else { return }
-                let now = Date()
-                var didUpdate = false
-                switch event.data {
-                case .hrSamples(let samples):
-                    self.diagnostics?.hrPacketCount += 1
-                    self.diagnostics?.hrSampleCount += samples.samples.count
-                    self.diagnostics?.rrIntervalCount += samples.samples.reduce(0) {
-                        $0 + $1.rrIntervals.count
-                    }
-                    self.lastRRReceivedAt = now
-                    if self.shouldPublishTimestamp(now, previous: self.lastRR) {
-                        self.lastRR = now
-                    }
-                    didUpdate = true
-                case .ecgSamples(let samples):
-                    self.diagnostics?.ecgPacketCount += 1
-                    self.diagnostics?.ecgSampleCount += samples.samples.count
-                    self.lastECGReceivedAt = now
-                    if self.shouldPublishTimestamp(now, previous: self.lastECG) {
-                        self.lastECG = now
-                    }
-                    didUpdate = true
-                case .accSamples(let samples):
-                    self.diagnostics?.accPacketCount += 1
-                    self.diagnostics?.accSampleCount += samples.samples.count
-                    self.lastACCReceivedAt = now
-                    if self.shouldPublishTimestamp(now, previous: self.lastACC) {
-                        self.lastACC = now
-                    }
-                    didUpdate = true
-                case .battery(let sample):
-                    self.diagnostics?.h10BatteryLatestPercent = sample.level
-                default:
-                    break
-                }
-                if didUpdate { self.updateLiveActivityIfDue(at: now) }
+                self?.ingest(event, sessionID: sessionID)
             }
             .store(in: &subscriptions)
 
@@ -245,6 +263,132 @@ final class ContinuousRecorder: ObservableObject {
             .store(in: &subscriptions)
     }
 
+    private func resetIngestion(for sessionID: String) {
+        ingestionQueue.sync {
+            uiPublishWorkItem?.cancel()
+            uiPublishWorkItem = nil
+            ingestionState = IngestionState(sessionID: sessionID)
+        }
+    }
+
+    private func ingest(_ event: SensorEvent, sessionID: String) {
+        guard ingestionState.sessionID == sessionID else { return }
+
+        // This is the only continuous-recording append path. It runs on the
+        // serial ingestion queue, preserving the publisher's packet order.
+        recorder.record(event)
+
+        var shouldPublish = false
+        switch event.data {
+        case .hrSamples(let samples):
+            ingestionState.hrPacketCount += 1
+            ingestionState.hrSampleCount += samples.samples.count
+            ingestionState.rrIntervalCount += samples.samples.reduce(0) {
+                $0 + $1.rrIntervals.count
+            }
+            ingestionState.lastRR = event.timestamp
+            shouldPublish = true
+        case .ecgSamples(let samples):
+            ingestionState.ecgPacketCount += 1
+            ingestionState.ecgSampleCount += samples.samples.count
+            ingestionState.lastECG = event.timestamp
+            shouldPublish = true
+        case .accSamples(let samples):
+            ingestionState.accPacketCount += 1
+            ingestionState.accSampleCount += samples.samples.count
+            ingestionState.lastACC = event.timestamp
+            shouldPublish = true
+        case .battery(let sample):
+            ingestionState.h10BatteryPercent = sample.level
+        default:
+            break
+        }
+
+        if shouldPublish {
+            scheduleIngestionPublishIfNeeded()
+        }
+    }
+
+    private func scheduleIngestionPublishIfNeeded() {
+        guard !ingestionState.uiPublishScheduled else { return }
+        ingestionState.uiPublishScheduled = true
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.ingestionState.uiPublishScheduled = false
+            self.uiPublishWorkItem = nil
+            guard let snapshot = self.makeIngestionSnapshot() else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.applyIngestionSnapshot(snapshot)
+            }
+        }
+        uiPublishWorkItem = workItem
+        ingestionQueue.asyncAfter(
+            deadline: .now() + Self.uiTimestampMinimumUpdateInterval,
+            execute: workItem
+        )
+    }
+
+    private func makeIngestionSnapshot() -> IngestionSnapshot? {
+        guard let sessionID = ingestionState.sessionID else { return nil }
+        return IngestionSnapshot(
+            sessionID: sessionID,
+            lastRR: ingestionState.lastRR,
+            lastECG: ingestionState.lastECG,
+            lastACC: ingestionState.lastACC,
+            h10BatteryPercent: ingestionState.h10BatteryPercent,
+            hrPacketCount: ingestionState.hrPacketCount,
+            hrSampleCount: ingestionState.hrSampleCount,
+            rrIntervalCount: ingestionState.rrIntervalCount,
+            ecgPacketCount: ingestionState.ecgPacketCount,
+            ecgSampleCount: ingestionState.ecgSampleCount,
+            accPacketCount: ingestionState.accPacketCount,
+            accSampleCount: ingestionState.accSampleCount
+        )
+    }
+
+    @discardableResult
+    private func drainIngestion(cancelScheduledPublish: Bool = false) -> IngestionSnapshot? {
+        ingestionQueue.sync {
+            if cancelScheduledPublish {
+                uiPublishWorkItem?.cancel()
+                uiPublishWorkItem = nil
+                ingestionState.uiPublishScheduled = false
+            }
+            return makeIngestionSnapshot()
+        }
+    }
+
+    private func applyIngestionSnapshot(
+        _ snapshot: IngestionSnapshot,
+        requireRunning: Bool = true
+    ) {
+        guard diagnostics?.sessionID == snapshot.sessionID else { return }
+        guard !requireRunning || isRunning else { return }
+
+        lastRRReceivedAt = snapshot.lastRR
+        lastECGReceivedAt = snapshot.lastECG
+        lastACCReceivedAt = snapshot.lastACC
+        lastRR = snapshot.lastRR
+        lastECG = snapshot.lastECG
+        lastACC = snapshot.lastACC
+
+        diagnostics?.hrPacketCount = snapshot.hrPacketCount
+        diagnostics?.hrSampleCount = snapshot.hrSampleCount
+        diagnostics?.rrIntervalCount = snapshot.rrIntervalCount
+        diagnostics?.ecgPacketCount = snapshot.ecgPacketCount
+        diagnostics?.ecgSampleCount = snapshot.ecgSampleCount
+        diagnostics?.accPacketCount = snapshot.accPacketCount
+        diagnostics?.accSampleCount = snapshot.accSampleCount
+        if let batteryPercent = snapshot.h10BatteryPercent {
+            diagnostics?.h10BatteryLatestPercent = batteryPercent
+        }
+
+        if snapshot.lastRR != nil || snapshot.lastECG != nil || snapshot.lastACC != nil {
+            updateLiveActivityIfDue(at: Date())
+        }
+    }
+
     // MARK: - Write window scheduling
     private func rescheduleWindows() {
         guard isRunning else { return }
@@ -255,8 +399,14 @@ final class ContinuousRecorder: ObservableObject {
 
     private func startWriteWindow() {
         isWriteWindow = true
-        // Start a fresh batch for this window
-        recorder.reset()
+        if discardBufferedEventsAtNextWindowStart {
+            // Put the reset in the same ordering domain as incoming packets so
+            // a packet cannot race across the start of the requested window.
+            ingestionQueue.sync {
+                recorder.reset()
+            }
+            discardBufferedEventsAtNextWindowStart = false
+        }
         sessionTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(durationSeconds), repeats: false) { [weak self] _ in
             self?.endWriteWindow()
         }
@@ -266,13 +416,19 @@ final class ContinuousRecorder: ObservableObject {
         isWriteWindow = false
         flushCurrentBatch()
         let off = max(0, intervalSeconds - durationSeconds)
+        discardBufferedEventsAtNextWindowStart = off > 0
         sessionTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(off), repeats: false) { [weak self] _ in
             self?.startWriteWindow()
         }
     }
 
     private func flushCurrentBatch() {
-        let bag = recorder.takeAndReset()
+        // Rotate the bag on the ingestion queue. Every packet accepted before
+        // this boundary lands in this file; every later packet lands in the
+        // next one.
+        let bag = ingestionQueue.sync {
+            recorder.takeAndReset()
+        }
         let writeStartedAt = Date()
         let deviceName = manager.peripheral?.name
         let sessionID = diagnostics?.sessionID
@@ -284,6 +440,7 @@ final class ContinuousRecorder: ObservableObject {
             maximumPendingFileWriteCount,
             pendingFileWriteCount
         )
+        let finalizationTask = beginFileFinalizationTask(sessionID: sessionID)
 
         fileWriteQueue.async { [weak self] in
             let result: Result<(URL, Int64), Error>
@@ -298,6 +455,7 @@ final class ContinuousRecorder: ObservableObject {
 
             let elapsedMilliseconds = Int64(Date().timeIntervalSince(writeStartedAt) * 1_000)
             DispatchQueue.main.async {
+                finalizationTask.end()
                 guard let self else { return }
                 if self.diagnostics?.sessionID == sessionID {
                     let pendingCount = self.diagnostics?.pendingFileWriteCount ?? 1
@@ -336,6 +494,23 @@ final class ContinuousRecorder: ObservableObject {
         }
     }
 
+    private func beginFileFinalizationTask(sessionID: String?) -> BackgroundTaskToken {
+        let token = BackgroundTaskToken()
+        token.identifier = UIApplication.shared.beginBackgroundTask(
+            withName: "ContinuousRecording.FileFinalization"
+        ) { [weak self, weak token] in
+            if self?.diagnostics?.sessionID == sessionID {
+                self?.diagnostics?.fileFinalizationExpirationCount += 1
+                self?.persistDiagnostics()
+            }
+            CustomLogger.log(
+                "[Continuous] File-finalization background time expired"
+            )
+            token?.end()
+        }
+        return token
+    }
+
     private func enqueueHealthKitImport(fileURL: URL, deviceName: String?, sessionID: String) {
         healthKitImports.append(
             PendingHealthKitImport(
@@ -360,7 +535,8 @@ final class ContinuousRecorder: ObservableObject {
         SensorBagPersistence.importSavedBagToHealthKit(
             fileURL: pending.fileURL,
             profile: .continuous,
-            deviceName: pending.deviceName
+            deviceName: pending.deviceName,
+            mode: .newFile
         ) { [weak self] result in
             guard let self else { return }
             let elapsedMilliseconds = Int64(
@@ -457,11 +633,6 @@ final class ContinuousRecorder: ObservableObject {
         }
     }
 
-    private func shouldPublishTimestamp(_ now: Date, previous: Date?) -> Bool {
-        guard let previous else { return true }
-        return now.timeIntervalSince(previous) >= Self.uiTimestampMinimumUpdateInterval
-    }
-
     private func updateLiveActivityIfDue(at now: Date) {
         if let lastLiveActivityUpdateAt,
             now.timeIntervalSince(lastLiveActivityUpdateAt)
@@ -498,18 +669,20 @@ final class ContinuousRecorder: ObservableObject {
     ///   - message: User-provided string to record with the event.
     ///   - timestamp: Timestamp to associate with the event (defaults to now).
     func logCustomEvent(_ message: String, at timestamp: Date = Date()) {
-        // print("Custom message: \(message) \(timestamp)")
-        recorder.markCustomEvent(message, at: timestamp)
+        ingestionQueue.async { [weak self] in
+            self?.recorder.markCustomEvent(message, at: timestamp)
+        }
     }
 
     // MARK: - Lightweight diagnostics
 
-    private func startDiagnostics(at start: Date) {
+    private func startDiagnostics(at start: Date) -> String {
         wasBatteryMonitoringEnabled = UIDevice.current.isBatteryMonitoringEnabled
         UIDevice.current.isBatteryMonitoringEnabled = true
+        let sessionID = UUID().uuidString
         diagnostics = ContinuousRecordingDiagnostics(
-            schemaVersion: 1,
-            sessionID: UUID().uuidString,
+            schemaVersion: 2,
+            sessionID: sessionID,
             startedAt: start,
             configuredDurationSeconds: durationSeconds,
             configuredIntervalSeconds: intervalSeconds,
@@ -521,6 +694,7 @@ final class ContinuousRecorder: ObservableObject {
             generatedAt: start
         )
         persistDiagnostics()
+        return sessionID
     }
 
     private func stopDiagnostics() {

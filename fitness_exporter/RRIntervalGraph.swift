@@ -21,6 +21,28 @@ final class RRIntervalGraphModel: ObservableObject {
         }
     }
 
+    /// Replace the visible RR window with a snapshot accumulated off the main
+    /// thread while the graph was hidden or the app was inactive.
+    func replace(samples: [Sample], lastPackageTime: Date?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        self.lastPackageTime = lastPackageTime
+        self.samples = samplesInWindow(samples, relativeTo: lastPackageTime)
+        pruneStageMarkers()
+    }
+
+    /// Append a coalesced group of samples with a single published mutation.
+    func append(samples: [Sample], lastPackageTime: Date?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let lastPackageTime {
+            self.lastPackageTime = lastPackageTime
+        }
+        self.samples = samplesInWindow(
+            self.samples + samples,
+            relativeTo: self.lastPackageTime
+        )
+        pruneStageMarkers()
+    }
+
     func append(intervals: [Double], packageTime: Date) {
         // print("new package: \(packageTime) \(intervals)")
         guard !intervals.isEmpty else { return }
@@ -49,8 +71,19 @@ final class RRIntervalGraphModel: ObservableObject {
 
     private func pruneOld() {
         guard let last = lastPackageTime else { return }
+        samples = samplesInWindow(samples, relativeTo: last)
+        pruneStageMarkers()
+    }
+
+    private func samplesInWindow(_ samples: [Sample], relativeTo last: Date?) -> [Sample] {
+        guard let last else { return samples }
         let cutoff = last.addingTimeInterval(-window)
-        samples.removeAll { $0.received < cutoff }
+        return samples.filter { $0.received >= cutoff }
+    }
+
+    private func pruneStageMarkers() {
+        guard let last = lastPackageTime else { return }
+        let cutoff = last.addingTimeInterval(-window)
         stageMarkers = stageMarkers.filter { $0 >= cutoff }
     }
 }

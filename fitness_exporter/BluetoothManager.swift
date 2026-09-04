@@ -181,7 +181,9 @@ class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         backend.eventPublisher
             .sink { [weak self] event in
                 if case .battery(let sample) = event.data {
-                    self?.batteryLevel = sample.level
+                    DispatchQueue.main.async { [weak self] in
+                        self?.batteryLevel = sample.level
+                    }
                 }
                 self?.eventSubject.send(event)
             }
@@ -236,6 +238,12 @@ class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         backend = nil
         backendCancellables.removeAll()
+    }
+
+    /// Ensure packets already accepted by the active backend have reached
+    /// `sensorPublisher` before a recorder detaches.
+    func drainPendingSensorEvents() {
+        backend?.drainPendingEvents()
     }
 
     // MARK: - Remembered devices persistence and reconnect

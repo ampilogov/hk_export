@@ -24,6 +24,7 @@ private class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
 }
 
 struct HRVView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var isProcessing: Bool
     @StateObject private var manager: BluetoothManager
     @StateObject private var continuousRecorder: ContinuousRecorder
@@ -49,6 +50,7 @@ struct HRVView: View {
     @State private var showCustomEventSheet: Bool = false
     @State private var customEventText: String = ""
     @State private var customEventTimestamp: Date?
+    @State private var isViewVisible = false
     
     // Bridge that subscribes once to manager events and updates UI + graph
     @StateObject private var eventBridge: HRVEventBridge
@@ -300,6 +302,8 @@ struct HRVView: View {
         .padding()
         .navigationTitle("HRV")
         .onAppear {
+            isViewVisible = true
+            updateEventPresentationState()
             // Ensure any persisted durations fall within our supported range so the steppers work
             validateDurations()
             UIApplication.shared.isIdleTimerDisabled = true
@@ -347,8 +351,13 @@ struct HRVView: View {
             }
         }
         .onDisappear {
+            isViewVisible = false
+            updateEventPresentationState()
             subscriptions.removeAll()
             UIApplication.shared.isIdleTimerDisabled = false
+        }
+        .onChange(of: scenePhase) {
+            updateEventPresentationState()
         }
         .confirmationDialog(
             "Stop recording?",
@@ -398,6 +407,10 @@ struct HRVView: View {
             .padding()
             .presentationDetents([.medium])
         }
+    }
+
+    private func updateEventPresentationState() {
+        eventBridge.setPresentationActive(isViewVisible && scenePhase == .active)
     }
     private var liveActivityEnabledOnDevice: Bool {
         if #available(iOS 16.1, *) {

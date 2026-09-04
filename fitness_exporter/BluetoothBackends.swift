@@ -19,6 +19,9 @@ protocol BluetoothBackend {
     func connect() -> AnyPublisher<Void, Error>
     /// Clean up internal streams and detach from the device.
     func disconnect()
+    /// Wait until sensor packets already accepted by the backend have been
+    /// published. Used before a recording detaches at Stop.
+    func drainPendingEvents()
 
     /// List of CoreBluetooth services this backend needs discovered.
     /// Return an empty array to skip CoreBluetooth service discovery entirely.
@@ -46,6 +49,7 @@ extension BluetoothBackend {
         Just(()).setFailureType(to: Error.self).eraseToAnyPublisher()
     }
     func disconnect() {}
+    func drainPendingEvents() {}
     func requiredServices() -> [CBUUID] { [] }
     func didDiscoverServices(peripheral: CBPeripheral, error: Error?) {}
     func didDiscoverCharacteristics(peripheral: CBPeripheral, service: CBService, error: Error?) {}
@@ -198,10 +202,16 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
     private let deviceId: String
     private var api: PolarBleApi?
     private var disposeBag = DisposeBag()
+    private let streamQueue = DispatchQueue(
+        label: "com.fitness_exporter.polarStreamProcessing",
+        qos: .utility
+    )
+    private let streamQueueKey = DispatchSpecificKey<Void>()
 
     required init(deviceId: String) {
         self.deviceId = deviceId
         super.init()
+        streamQueue.setSpecific(key: streamQueueKey, value: ())
         api = PolarBleApiDefaultImpl.polarImplementation(
             DispatchQueue.main,
             features: [
@@ -232,6 +242,7 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
     }
 
     func disconnect() {
+        drainPendingEvents()
         eventSubject.send(completion: .finished)
         disconnectSubject.send()
         disconnectSubject.send(completion: .finished)
@@ -239,6 +250,11 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
         ecgStarted = false
         accStarted = false
         try? api?.disconnectFromDevice(deviceId)
+    }
+
+    func drainPendingEvents() {
+        guard DispatchQueue.getSpecific(key: streamQueueKey) == nil else { return }
+        streamQueue.sync {}
     }
 
     func requiredServices() -> [CBUUID] {
@@ -263,7 +279,9 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
             timestamp: timestamp,
             data: .battery(BatterySample(level: Int(batteryLevel)))
         )
-        eventSubject.send(event)
+        streamQueue.async { [weak self] in
+            self?.eventSubject.send(event)
+        }
     }
     func batteryChargingStatusReceived(
         _ identifier: String, chargingStatus: BleBasClient.ChargeState
@@ -331,18 +349,20 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
             .subscribe { [weak self] e in
                 switch e {
                 case .next(let data):
-                    let timestamp = Date()
-                    let samples = data.map {
-                        ECGSample(
-                            timestamp: $0.timeStamp,
-                            voltage: PolarSDKBackend.clampInt32To16($0.voltage)
+                    let receivedAt = Date()
+                    self?.streamQueue.async { [weak self] in
+                        let samples = data.map {
+                            ECGSample(
+                                timestamp: $0.timeStamp,
+                                voltage: PolarSDKBackend.clampInt32To16($0.voltage)
+                            )
+                        }
+                        let event = SensorEvent(
+                            timestamp: receivedAt,
+                            data: .ecgSamples(ECGSamples(samples: samples))
                         )
+                        self?.eventSubject.send(event)
                     }
-                    let event = SensorEvent(
-                        timestamp: timestamp,
-                        data: .ecgSamples(ECGSamples(samples: samples))
-                    )
-                    self?.eventSubject.send(event)
                 //                    if data.count > 0 {
                 //                        print("ECG cnt \(data.count)")
                 //                        print(
@@ -366,20 +386,22 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
             .subscribe { [weak self] e in
                 switch e {
                 case .next(let data):
-                    let timestamp = Date()
-                    let samples = data.map {
-                        AccSample(
-                            timestamp: $0.timeStamp,
-                            x: PolarSDKBackend.clampInt32To16($0.x),
-                            y: PolarSDKBackend.clampInt32To16($0.y),
-                            z: PolarSDKBackend.clampInt32To16($0.z)
+                    let receivedAt = Date()
+                    self?.streamQueue.async { [weak self] in
+                        let samples = data.map {
+                            AccSample(
+                                timestamp: $0.timeStamp,
+                                x: PolarSDKBackend.clampInt32To16($0.x),
+                                y: PolarSDKBackend.clampInt32To16($0.y),
+                                z: PolarSDKBackend.clampInt32To16($0.z)
+                            )
+                        }
+                        let event = SensorEvent(
+                            timestamp: receivedAt,
+                            data: .accSamples(AccSamples(samples: samples))
                         )
+                        self?.eventSubject.send(event)
                     }
-                    let event = SensorEvent(
-                        timestamp: timestamp,
-                        data: .accSamples(AccSamples(samples: samples))
-                    )
-                    self?.eventSubject.send(event)
                 //                    print("ACC cnt \(data.count)")
                 //                    print(
                 //                        "ACC Min/max \(data.map{min($0.x, $0.y, $0.z)}.min()!) \(data.map{max($0.x, $0.y, $0.z)}.max()!)"
@@ -401,22 +423,24 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
             .subscribe { [weak self] e in
                 switch e {
                 case .next(let data):
-                    let timestamp = Date()
-                    let samples = data.map { item -> HRSample in
-                        let rrs = item.rrsMs.map { Double($0) / 1000.0 }
-                        return HRSample(
-                            value: Int(item.hr),
-                            contactSupported: item.contactStatusSupported,
-                            contactDetected: item.contactStatus,
-                            energyExpended: nil,
-                            rrIntervals: rrs
+                    let receivedAt = Date()
+                    self?.streamQueue.async { [weak self] in
+                        let samples = data.map { item -> HRSample in
+                            let rrs = item.rrsMs.map { Double($0) / 1000.0 }
+                            return HRSample(
+                                value: Int(item.hr),
+                                contactSupported: item.contactStatusSupported,
+                                contactDetected: item.contactStatus,
+                                energyExpended: nil,
+                                rrIntervals: rrs
+                            )
+                        }
+                        let event = SensorEvent(
+                            timestamp: receivedAt,
+                            data: .hrSamples(HRSamples(samples: samples))
                         )
+                        self?.eventSubject.send(event)
                     }
-                    let event = SensorEvent(
-                        timestamp: timestamp,
-                        data: .hrSamples(HRSamples(samples: samples))
-                    )
-                    self?.eventSubject.send(event)
                 //                    print("HR: \(data.count) \(String(describing: data.first))")
                 case .error(let err):
                     CustomLogger.log("HR streaming error: \(err)")
