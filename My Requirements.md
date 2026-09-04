@@ -163,7 +163,7 @@ Evidence references:
 Current observations:
 
 - A UIKit background task is opened for the entire recording and has no expiration handler. Background tasks are finite; failing to end one before expiration can cause iOS to terminate the app.
-- Current recording data lives in memory until a complete window is serialized, so a crash can lose the active window.
+- **Lower-priority durability risk:** current recording data lives in memory until the five-minute window is serialized, so a crash can lose the unfinished window. Completed `.bin` files remain available to the existing HealthKit backfill and do not require a more elaborate recovery design now.
 - Clinical Health Records must remain part of the export. The target now declares Apple's separate `health-records` entitlement and all nine exported clinical types as required read authorizations.
 - If any required clinical permission is denied, HealthKit returns a required-authorization error and the export screen shows an actionable popup instead of continuing with a partial clinical export.
 - HealthKit does not disclose ordinary read authorization status. The required-clinical-types declaration is the supported way to make clinical denial an explicit authorization failure; it still cannot identify which clinical type was denied.
@@ -174,7 +174,7 @@ Current observations:
 Proposed approach:
 
 - Remove the session-long background task. Use short, balanced, expiration-safe tasks only around critical file finalization.
-- Add an append-only, crash-recoverable writer with a small bounded flush interval.
+- Defer unfinished-window crash protection until the higher-priority crash and battery work is understood. If implemented, prefer checkpointing or appending to one active local staging file rather than shortening the permanent file-rotation interval or creating many additional files. Measure disk activity, battery impact, and any backup/iCloud synchronization activity before enabling it by default.
 - Persist a lightweight active-session journal containing the session ID, selected device and streams, start time, last sensor packet, and last successful disk write.
 - Add MetricKit reporting and preserve symbolicated build archives. Detect an unfinished journal on launch and report that the previous recording ended unexpectedly.
 - Keep Clinical Health Records in the default authorization/export set with the required entitlement and usage description.
@@ -186,6 +186,7 @@ Acceptance criteria:
 
 - No background task remains open for the lifetime of a recording.
 - Force-terminating the app leaves a readable file with only a small, explicitly bounded tail at risk.
+- Any reduction in the crash-loss window must not materially increase battery drain or create an iCloud/file-synchronization storm.
 - The next launch identifies an interrupted recording and preserves relevant diagnostic context.
 - Crash, hang, watchdog, and memory-termination reports can be distinguished.
 - Recording and graph edge cases are covered by automated tests.
