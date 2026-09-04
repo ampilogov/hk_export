@@ -27,6 +27,8 @@ Completed items are removed from this active tracker instead of accumulating und
 
 Determine how much battery continuous recording consumes on both the iPhone and Polar H10, identify the largest sources of energy use, and reduce them without compromising the selected recording quality. Evaluate the real usage pattern: recording remains active for approximately 24 hours with the screen normally off, and the user disconnects the H10 after stopping. Once-daily morning HRV measurements did not exhibit the battery problem.
 
+All currently captured HR/RR, ECG, and ACC data is required for offline server analysis. R1 must not disable a stream, reduce its sampling rate, discard samples, or otherwise trade data completeness for battery life.
+
 **Status:** In progress — lightweight diagnostics and first low-risk optimizations implemented; first field run analyzed, valid unplugged battery comparison pending
 
 ### R2 — Prevent and diagnose crashes
@@ -67,8 +69,8 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 
 ## Recommended implementation order
 
-1. **R2 and R5 — Long-run stability and independent failure notification.** Diagnose the reported approximately 12-hour termination and add a low-frequency dead-man alert that survives the app process.
-2. **R1 — Energy and stream lifecycle.** Continue collecting normal-use evidence and address remaining high-confidence energy defects without requiring a dedicated long profiling campaign.
+1. **R1 — Energy and stream lifecycle.** Continue collecting normal-use evidence and address remaining high-confidence energy defects without requiring a dedicated long profiling campaign.
+2. **R2 and R5 — Long-run stability and independent failure notification.** Diagnose the reported approximately 12-hour termination and add a low-frequency dead-man alert that survives the app process.
 3. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then change the future file format and upload pipeline.
 4. **R4 — Reconnection and recording resume.** Build this around the same health state and escalation rules used by R5.
 5. **R6 — ECG inspection.** Build the viewer after the storage format supports efficient time-range reads.
