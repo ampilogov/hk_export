@@ -272,12 +272,6 @@ struct HRVView: View {
                     }
                     .disabled(connectionPhase == .recording)
 
-                    if let reportURL = continuousRecorder.diagnosticsReportURL {
-                        ShareLink(item: reportURL) {
-                            Label("Share Recording Diagnostics", systemImage: "square.and.arrow.up")
-                        }
-                        .font(.footnote)
-                    }
                 }
             }
             
