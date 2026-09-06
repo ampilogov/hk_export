@@ -1,6 +1,6 @@
 # My Requirements
 
-Last updated: September 4, 2026
+Last updated: September 6, 2026
 
 This document tracks improvements to continuous Polar H10 recording. Requirements are kept separate from implementation considerations so that each item can be discussed, implemented, and verified independently.
 
@@ -20,6 +20,7 @@ Completed items are removed from this active tracker instead of accumulating und
 - Show the exact failed operation, data type/file or time range, and underlying error to the user. Record the same context in the application log.
 - A pipeline failure should be explicit and retryable rather than an intentional process crash. Raw recording may continue when its data is already durable and only a downstream HealthKit/upload stage failed; the failed downstream stage must remain pending.
 - Automatic retries must be bounded and visible. Never convert failure into success merely because all remaining items were traversed.
+- The SensorBag v1 binary bytes, visible `.bin` filename scheme, and server-facing upload/export contract are compatibility requirements. Internal durability work may use temporary files, but the final filename, payload metadata, endpoint-visible type/version, and source bytes must remain unchanged unless a separate server migration is explicitly approved.
 
 ## Platform compatibility
 
@@ -63,13 +64,27 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 
 **Status:** Proposed
 
+### R8 — Protect cursor and backfill reset controls
+
+Prevent accidental cursor or HealthKit-backfill resets from launching unexpectedly large re-exports or duplicate work. Reset actions must explain their consequences, require confirmation, and refuse to race an active recording, export, or backfill operation.
+
+**Status:** Proposed
+
+### R9 — Keep the rest of the app usable during continuous recording
+
+Allow navigation to other tabs while continuous recording continues. Keep recording state and controls visible, while disabling only operations that genuinely conflict with active recording.
+
+**Status:** Proposed
+
 ## Recommended implementation order
 
 1. **R2 and R5 — Long-run stability and independent failure notification.** Diagnose the reported approximately 12-hour termination and add a low-frequency dead-man alert that survives the app process.
-2. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then change the future file format and upload pipeline.
+2. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then compact local storage without changing server-visible files or payloads.
 3. **R4 — Reconnection and recording resume.** Build this around the same health state and escalation rules used by R5.
 4. **R6 — ECG inspection.** Build the viewer after the storage format supports efficient time-range reads.
-5. **R7 — Remaining improvements.** Reassess after the earlier work.
+5. **R8 — Reset safety.** Protect destructive cursor and backfill reset controls before making the rest of the UI available during recording.
+6. **R9 — Recording-time UI usability.** Remove the global tab lock after recording state and conflicting actions are safely app-scoped.
+7. **R7 — Remaining improvements.** Reassess after the earlier work.
 
 ## Status tracker
 
@@ -81,6 +96,8 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 | R5 | Notification behavior | Ready | Add a rolling local dead-man notification and stale Live Activity state; verify delivery on the paired Apple Watch |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
 | R7 | Other inefficiencies | Proposed | Reassess after R2–R3 |
+| R8 | Reset-button safety | Proposed | Define confirmation, busy-state, and error-result behavior for both reset controls |
+| R9 | UI during active recording | Proposed | Move recording status to app scope and inventory actions that must remain disabled |
 
 ## Considerations by requirement
 
@@ -89,7 +106,9 @@ Review memory use, disk writes, HealthKit imports, background execution, UI upda
 Current observations:
 
 - The app reportedly terminates silently after roughly 12 hours of continuous recording. The user normally discovers this only after unlocking the phone. No crash, Jetsam, watchdog, or hang artifact has yet identified the cause.
-- **Lower-priority durability risk:** current recording data lives in memory until the five-minute window is serialized, so a crash can lose the unfinished window. Completed `.bin` files remain available to the existing HealthKit backfill and do not require a more elaborate recovery design now.
+- The recording invariant is that every `SensorEvent` delivered by the SDK is written exactly once, in per-stream order, to exactly one adjacent v1 file. The current format cannot recover a packet that never reached the app, and a process crash can still lose the unfinished in-memory window of up to the configured recording duration.
+- A rotation swaps bags synchronously but saves the old bag asynchronously. Completion from an earlier recording must never update the session marker or watchdog for a later recording.
+- Current final-file writes are not atomic, so process termination during a write can leave a truncated file with a normal `.bin` name. A save failure is logged but currently releases the rotated bag.
 - Some HealthKit export paths use `fatalError` for unexpected data, and the RR graph assumes ordered timestamps and non-zero plot ranges. These remain possible crash paths to harden if termination evidence implicates them.
 - Large directory scans and HealthKit index work can run from the main thread, creating watchdog risk.
 - There is no test target or integrated crash, hang, or memory-termination reporting.
@@ -98,14 +117,18 @@ Proposed approach:
 
 - Defer unfinished-window crash protection until the termination cause is understood. If implemented, prefer one active staging file rather than more frequent permanent file rotation.
 - Add MetricKit reporting and preserve symbolicated build archives so crash, watchdog, hang, and memory-termination evidence survives the process.
-- Use only a tiny active-session marker, updated at existing five-minute checkpoints, to tell the next launch that recording ended unexpectedly. Do not restore the removed packet counters, battery sampling, or continuously rewritten JSON report.
+- Keep MetricKit artifacts bounded and outside the recording directory. Do not restore packet counters, battery sampling, or a continuously rewritten diagnostic report.
+- Use only a tiny active-session marker outside SensorBag to tell the next launch that recording ended unexpectedly. Associate all asynchronous completions with the recording ID.
+- Preserve the exact v1 bytes and final filename while using atomic final-file replacement. Advance durable state only after the final write succeeds. Retain and visibly report a failed rotated bag rather than silently discarding it.
+- Add byte-for-byte v1 compatibility tests and concurrent rotation tests that prove SDK-delivered packets are neither dropped nor duplicated across boundaries.
 - Run a 12-hour physical-device soak first, followed by a 24-hour confirmation after fixing the identified cause. Classify the event as a crash, watchdog termination, Jetsam/memory termination, or recording stall before treating it as resolved.
 - Harden plotting against duplicate timestamps, empty data, and constant ranges.
 - Add unit tests and interruption tests before making larger recording changes.
 
 Acceptance criteria:
 
-- Force-terminating the app leaves a readable file with only a small, explicitly bounded tail at risk.
+- Previously completed files remain readable after force termination; only the unfinished current window remains at risk, bounded by the configured recording duration.
+- The binary bytes, final filename, and server-visible upload/export contract remain unchanged.
 - Any reduction in the crash-loss window must not materially increase battery drain or create an iCloud/file-synchronization storm.
 - The next launch identifies an interrupted recording and preserves relevant diagnostic context.
 - Crash, hang, watchdog, and memory-termination reports can be distinguished.
@@ -133,21 +156,21 @@ Proposed approach:
 
 - Immediate client-only improvement: display cached aggregate status immediately and scan asynchronously on a dedicated actor. Never perform file metadata reads from a SwiftUI computed property.
 - Replace per-file `.done` records and the HealthKit JSON index with one transactional SQLite index.
-- Store future continuous data as one logical session with crash-recoverable hourly local segment files. Preserve a five-minute durability/upload checkpoint without requiring a permanent standalone local file for every checkpoint.
+- Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
 - Introduce one upload actor/coordinator with a durable pending queue, bounded concurrency, and deduplication across UI, recording, and background triggers.
 - Mark every finalized five-minute package pending immediately and begin its transfer while recording continues. Permit both Wi-Fi and cellular, including expensive-network access; do not wait for recording Stop.
 - Hold security-scoped access for the entire asynchronous operation and test access loss explicitly.
 - Use a background `URLSession` and file-backed request bodies so the system can continue eligible transfers while the app is suspended and upload memory remains bounded.
 - Add a collection-level circuit breaker and retry budget. Immediate sending over cellular is required, but a confirmed server/network outage must pause and reschedule the batch instead of retrying every pending file continuously.
 - Replace recursive file traversal with iteration and aggregate repetitive logs into periodic progress summaries.
-- Preferred server-assisted improvement: upload size-limited bundles with a manifest, content hashes, idempotent acknowledgement, and resumable progress.
+- Any future bundled or resumable transport must remain outside scope unless the server migration and compatibility contract are explicitly approved.
 - Provide an explicit migration/compaction tool for the existing backlog. Never delete originals until the compacted output is verified and the configured retention rule permits deletion.
 
 Acceptance criteria:
 
 - The Upload screen presents useful cached information in under 0.5 seconds with 50,000 indexed recordings.
 - UI rendering does not trigger repeated directory scans or metadata reads.
-- Future uninterrupted capture creates no more than 24 permanent local recording segments per day while retaining five-minute durability/upload checkpoints.
+- Local compaction can reproduce every original five-minute filename and byte sequence exactly; until compaction is verified and reversible, the original files remain untouched.
 - Every finalized five-minute package is immediately represented in the durable pending queue and starts an upload attempt without ending the recording.
 - Upload is allowed over both Wi-Fi and cellular.
 - A collection-wide network failure performs a bounded number of attempts and cannot generate one retry storm per pending file.
@@ -157,7 +180,7 @@ Acceptance criteria:
 
 Dependencies and decisions:
 
-- Bundled or resumable upload may require a compatible server endpoint. The asynchronous UI, single index, hourly files, and bounded-memory client can be completed without that server change.
+- Server protocol changes are not part of the current plan. Asynchronous UI, a single local index, bounded-memory uploads, and reversible local archival can be completed while preserving the existing server contract.
 - Retention policy must remain conservative by default: keep source data unless deletion has been explicitly enabled.
 
 ### R4 considerations — Auto reconnect and recording resume
@@ -203,8 +226,10 @@ Proposed behavior:
 - **At 60 seconds or after repeated failed attempts:** send one audible “Recording needs attention” notification.
 - Cancel pending disconnect notifications immediately after recovery and avoid a noisy “recovered” notification for very short gaps.
 - Monitor only streams enabled in the current recording profile and use stable notification identifiers for replacement and cancellation.
-- Maintain a low-frequency local watchdog notification scheduled in advance and refreshed while recording is healthy. If the process dies or data stops, the already-scheduled notification can still fire.
-- Initially refresh one stable watchdog notification identifier after each successful five-minute recording checkpoint, scheduling it far enough ahead to tolerate one delayed checkpoint. Explicit Stop cancels it. This avoids a high-frequency timer and should add negligible steady-state work.
+- Keep the crash/data watchdog independent of the file-rotation interval. Refresh one stable, pre-scheduled local notification at a bounded cadence only while RR, ECG, and ACC are all advancing. If the process dies or data stops, the already-scheduled notification can still fire.
+- Make the watchdog deadline configurable in Settings. The initial proposal is a three-minute default refreshed at most once per minute, producing an expected trigger roughly two to three minutes after process death. Longer options should remain available if physical-device use shows false alerts.
+- Schedule the first watchdog when recording starts. Explicit Stop cancels both pending and already-delivered watchdog alerts. Session-ID guards must prevent a late save or callback from an older recording from rearming it.
+- Treat raw file-write failure separately: show an immediate attention alert and do not refresh durable progress. The watchdog must never be required for the recording write path and must never change, insert events into, or delay a SensorBag.
 - Give each Live Activity update a future stale date and render a conspicuous stale state. Treat this as a secondary visual indicator, not the only alert mechanism.
 - Use normal notification delivery to reach the paired Apple Watch when the iPhone is locked or asleep; do not add a watchOS target solely for the first watchdog implementation.
 - Consider a server-side missing-heartbeat alert later if immediate failure notification must work across app termination, phone failure, or loss of local execution.
@@ -215,6 +240,7 @@ Acceptance criteria:
 - A persistent interruption produces one notification at each configured escalation level, not one per stream or callback.
 - Recovery cancels all obsolete pending alerts.
 - A simulated dead process results in the pre-scheduled watchdog notification.
+- The configured watchdog can request delivery in less than five minutes without changing the five-minute recording cadence.
 - Explicitly stopping a recording cancels the watchdog and all reconnect alerts.
 - A healthy 12-hour run produces no false watchdog alert, while terminating the app after a checkpoint produces one alert within the documented grace period.
 - Watch delivery is verified with the iPhone locked and the paired Apple Watch unlocked; failure to mirror must remain visible on the iPhone.
@@ -241,7 +267,7 @@ Proposed approach:
 - Draw one fixed-size viewport using `Canvas`, with min/max envelope downsampling, drag-to-pan, and optional pinch zoom. Do not create a SwiftUI view per ECG sample.
 - Maintain only a small live ECG ring buffer while the detail view is visible.
 - Add a range reader compatible with existing version-1 files.
-- Include explicit device-clock-to-wall-clock alignment and byte-range indexing in the next recording format so selections remain accurate across segments and reconnects.
+- Build device-clock-to-wall-clock alignment and byte-range indexes as sidecar metadata so existing v1 files remain unchanged. Consider a new recording format only as a separately approved migration if sidecars prove insufficient.
 
 Acceptance criteria:
 
@@ -267,6 +293,45 @@ Acceptance criteria:
 - No synchronous disk or network work blocks the main thread.
 - Background expiration, disk-full, corrupt-tail, permission-loss, and network-loss cases fail safely without silently losing the whole session.
 
+### R8 considerations — Reset-button safety
+
+Current observations:
+
+- “Reset background refresh cursors” immediately deletes all incremental-export cursor values with one tap. A later export can consequently begin from the default 2001 start date.
+- “Reset backfill memory” immediately forgets which SensorBag files were imported. It is disabled only for a backfill started from the current Settings view and does not protect against other active work.
+- A lock can reject some cursor resets internally, but the button does not explain the failure or confirm what was changed.
+
+Proposed behavior:
+
+- Put both reset controls in a visually destructive section and require a confirmation that names the resulting reprocessing work.
+- Refuse reset while the corresponding exporter/backfill is active or while continuous recording is active; return and display an explicit result rather than relying only on a log.
+- Report how many cursor or index entries were removed. Do not automatically start the resulting re-export.
+
+Acceptance criteria:
+
+- Neither reset can occur with one accidental tap.
+- A busy-state race cannot partially reset state.
+- Success and failure are visible, including the number of removed entries.
+
+### R9 considerations — UI during active recording
+
+Current observations:
+
+- The root tab view currently redirects every attempted tab change back to HRV while `isProcessing` is true and blurs other tabs.
+- This prevents viewing logs, upload state, and safe settings during a long recording.
+
+Proposed behavior:
+
+- Move continuous-recording status to app-scoped state rather than using a global UI lock.
+- Permit normal tab navigation while recording and show a persistent recording indicator with elapsed time and a path back to Stop.
+- Disable or guard only actions that conflict with recording, such as destructive state resets or starting a second recording/export with unsafe resource overlap.
+
+Acceptance criteria:
+
+- Switching tabs does not stop, restart, duplicate, or interrupt sensor ingestion.
+- Logs and upload status remain readable during recording.
+- Returning to HRV shows the same session and controls.
+
 ## Decision log
 
 Record decisions here as requirements are refined.
@@ -278,6 +343,9 @@ Record decisions here as requirements are refined.
 | 2026-09-04 | R2/R5 | Restore the approximately 12-hour silent termination as a high-priority issue and add an independent dead-man alert | The first-use HealthKit fix did not address the original long-recording failure, and an app cannot notify after its own process has already died unless the alert was scheduled in advance or sent externally |
 | 2026-09-04 | R5 | Start with a rolling local notification plus stale Live Activity rather than a new watchOS app | This provides process-independent alerting with low update frequency and can reach a paired Apple Watch through normal notification routing |
 | 2026-09-04 | All | Remove completed items from this active tracker | Keep the document focused on unresolved requirements; use Git history for completed work |
+| 2026-09-06 | R2/R3 | Preserve v1 bytes, final filenames, and the server-facing upload/export contract | Crash protection and scalability work must not silently break offline reconstruction or backend compatibility |
+| 2026-09-06 | R5 | Decouple the configurable crash/data watchdog from five-minute file rotation | Notification latency may be shorter than the persistence interval, while file-write failures remain an immediate and separate error path |
+| 2026-09-06 | R8/R9 | Capture reset-button protection and recording-time tab navigation as separate work | These concerns should not be forgotten or silently expand the current crash slice |
 
 ## Progress notes
 
