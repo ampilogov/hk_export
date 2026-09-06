@@ -42,7 +42,7 @@ The app must remain responsive with tens of thousands of existing recordings. Op
 
 ### R4 — Automatically reconnect and resume recording
 
-When the Polar H10 disconnects unexpectedly, the app should reconnect automatically and resume recording without requiring manual intervention. The resulting data should clearly represent any gap.
+Use the Polar SDK with one repeatable connection and stream lifecycle. Repeated Stop/Start, disconnect/reconnect, and unrelated upload activity must not leave HR/RR, ECG, or ACC partially stopped. When the Polar H10 disconnects unexpectedly, the app should reconnect automatically and resume every required stream without manual intervention. The resulting data should clearly represent any unavoidable gap.
 
 **Status:** Proposed
 
@@ -191,6 +191,10 @@ Current observations:
 - The Polar SDK enables automatic reconnection by default, but the current disconnect callback explicitly disconnects the SDK session, likely cancelling that behavior.
 - CoreBluetooth and Polar SDK paths can both emit disconnect events and do not share one authoritative readiness state.
 - The UI can consider the device connected before RR, ECG, and ACC streams are actually ready.
+- The app first connects through its own `CBCentralManager`, then creates a separate Polar SDK API and asks the SDK to connect to the same identifier. This gives connection ownership to two independent Bluetooth stacks.
+- Polar stream-start flags are set before streaming succeeds and are not cleared when ECG, ACC, or HR emits an error or completion. That backend instance therefore cannot restart a failed stream.
+- The Polar disconnect callback calls the backend's explicit `disconnect()`, completing its event publishers and asking the SDK to disconnect even though SDK automatic reconnection is enabled by default.
+- Stop/Start of continuous recording only detaches and reattaches the recorder subscription; it does not verify that all three underlying SDK streams are still healthy.
 
 Proposed approach:
 
@@ -198,6 +202,7 @@ Proposed approach:
 - Track user intent separately from connection state. An unexpected disconnect must not clear the intent to keep recording; an explicit Stop must.
 - On loss, safely finalize the current segment, record a structured gap, and retry immediately with bounded exponential backoff.
 - Use one authoritative Polar connection path and deduplicate disconnect events.
+- Give each connection generation fresh, individually disposable stream subscriptions. Clear stream state on error, completion, and disconnect; ignore callbacks belonging to an obsolete generation.
 - Resume automatically only after all streams required by the selected profile have produced readiness or data signals.
 - Preserve enough session intent to recover after a system relaunch and adopt supported Bluetooth state preservation/restoration behavior.
 
@@ -207,6 +212,8 @@ Acceptance criteria:
 - Reconnection creates a new recoverable segment under the same logical session and records the gap duration.
 - Intentional Stop never triggers reconnection.
 - Duplicate callbacks cannot create duplicate sessions, alerts, or writers.
+- Repeating Stop/Start and disconnect/reconnect cycles cannot leave ECG or ACC absent while HR continues, and upload work cannot mutate Bluetooth stream state.
+- The UI reports `recording` only after RR, ECG, and ACC have each delivered data for the current connection generation.
 - Reconnection behavior is covered with deterministic simulated-device tests.
 
 ### R5 considerations — Notifications
@@ -346,6 +353,7 @@ Record decisions here as requirements are refined.
 | 2026-09-06 | R2/R3 | Preserve v1 bytes, final filenames, and the server-facing upload/export contract | Crash protection and scalability work must not silently break offline reconstruction or backend compatibility |
 | 2026-09-06 | R5 | Decouple the configurable crash/data watchdog from five-minute file rotation | Notification latency may be shorter than the persistence interval, while file-write failures remain an immediate and separate error path |
 | 2026-09-06 | R8/R9 | Capture reset-button protection and recording-time tab navigation as separate work | These concerns should not be forgotten or silently expand the current crash slice |
+| 2026-09-06 | R4 | Treat repeatable Polar SDK stream lifecycle as a prerequisite for reconnect/resume | Current dual connection ownership, terminal publisher teardown, and sticky stream-start flags can explain HR continuing while ECG or ACC fails after repeated lifecycle operations |
 
 ## Progress notes
 
