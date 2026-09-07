@@ -317,8 +317,14 @@ final class SensorBagCompatibilityTests: XCTestCase {
             files.append(file)
         }
         for file in files.prefix(uploadedCount) {
-            XCTAssertNotNil(UploadHelper.markDone(file: file, base: base))
+            try UploadHelper.markDone(file: file, base: base)
         }
+        let doneDirectory = base.appendingPathComponent(".done", isDirectory: true)
+        let legacySidecars = try fm.contentsOfDirectory(
+            at: doneDirectory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "json" }
+        XCTAssertTrue(legacySidecars.isEmpty)
 
         let initial = try UploadHelper.inventory(in: base)
         XCTAssertEqual(initial.totalCount, fileCount)
@@ -329,6 +335,126 @@ final class SensorBagCompatibilityTests: XCTestCase {
         let afterMutation = try UploadHelper.inventory(in: base)
         XCTAssertEqual(afterMutation.uploadedCount, uploadedCount - 1)
         XCTAssertEqual(afterMutation.pendingCount, fileCount - uploadedCount + 1)
+    }
+
+    func test_uploadCompletionIndex_migratesAndRemovesVerifiedLegacySidecars() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let doneDirectory = base.appendingPathComponent(".done", isDirectory: true)
+        try fm.createDirectory(at: doneDirectory, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let files = try (0..<3).map { index -> URL in
+            let file = base.appendingPathComponent("legacy-\(index).bin")
+            try Data([UInt8(index), 42]).write(to: file, options: .atomic)
+            return file
+        }
+        let originalBytes = try files.map { try Data(contentsOf: $0) }
+        let sidecars = try files.map { file -> URL in
+            let values = try file.resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]
+            )
+            let record = UploadDoneRecord(
+                fileName: file.lastPathComponent,
+                fileSize: Int64(try XCTUnwrap(values.fileSize)),
+                lastModifiedAt: try XCTUnwrap(values.contentModificationDate)
+            )
+            let sidecar = doneDirectory.appendingPathComponent(
+                "\(file.lastPathComponent).json"
+            )
+            try JSONEncoder().encode(record).write(to: sidecar, options: .atomic)
+            return sidecar
+        }
+
+        let inventory = try UploadHelper.inventory(in: base)
+
+        XCTAssertEqual(inventory.totalCount, files.count)
+        XCTAssertEqual(inventory.uploadedCount, files.count)
+        XCTAssertEqual(inventory.pendingCount, 0)
+        XCTAssertTrue(
+            fm.fileExists(atPath: UploadCompletionIndex.indexURL(in: base).path)
+        )
+        for sidecar in sidecars {
+            XCTAssertFalse(fm.fileExists(atPath: sidecar.path))
+        }
+        for (index, file) in files.enumerated() {
+            XCTAssertEqual(try Data(contentsOf: file), originalBytes[index])
+        }
+
+        let reopenedInventory = try UploadHelper.inventory(in: base)
+        XCTAssertEqual(reopenedInventory.uploadedCount, files.count)
+    }
+
+    func test_uploadCompletionIndex_invalidLegacyRecordFailsWithoutDeletingSources() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let doneDirectory = base.appendingPathComponent(".done", isDirectory: true)
+        try fm.createDirectory(at: doneDirectory, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let recording = base.appendingPathComponent("recording.bin")
+        let recordingBytes = Data([1, 2, 3, 4])
+        try recordingBytes.write(to: recording, options: .atomic)
+        let invalidSidecar = doneDirectory.appendingPathComponent(
+            "z-invalid.bin.json"
+        )
+        try Data("not-json".utf8).write(to: invalidSidecar, options: .atomic)
+        let recordingValues = try recording.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        let validRecord = UploadDoneRecord(
+            fileName: recording.lastPathComponent,
+            fileSize: Int64(try XCTUnwrap(recordingValues.fileSize)),
+            lastModifiedAt: try XCTUnwrap(recordingValues.contentModificationDate)
+        )
+        let validSidecar = doneDirectory.appendingPathComponent(
+            "\(recording.lastPathComponent).json"
+        )
+        try JSONEncoder().encode(validRecord).write(
+            to: validSidecar,
+            options: .atomic
+        )
+
+        XCTAssertThrowsError(try UploadHelper.inventory(in: base)) { error in
+            guard case UploadCoreError.completionState(let message) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("z-invalid.bin.json"))
+            XCTAssertTrue(message.contains("Decode"))
+        }
+        XCTAssertTrue(fm.fileExists(atPath: invalidSidecar.path))
+        XCTAssertTrue(fm.fileExists(atPath: validSidecar.path))
+        XCTAssertEqual(try Data(contentsOf: recording), recordingBytes)
+    }
+
+    func test_uploadCompletionIndex_resetMakesFilesPendingWithoutDeletingRecordings() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let files = try (0..<2).map { index -> URL in
+            let file = base.appendingPathComponent("reset-\(index).bin")
+            try Data([UInt8(index)]).write(to: file, options: .atomic)
+            try UploadHelper.markDone(file: file, base: base)
+            return file
+        }
+        XCTAssertEqual(try UploadHelper.inventory(in: base).uploadedCount, 2)
+
+        XCTAssertEqual(try UploadHelper.resetCompletionState(in: base), 2)
+
+        let resetInventory = try UploadHelper.inventory(in: base)
+        XCTAssertEqual(resetInventory.uploadedCount, 0)
+        XCTAssertEqual(resetInventory.pendingCount, 2)
+        XCTAssertTrue(
+            fm.fileExists(atPath: UploadCompletionIndex.indexURL(in: base).path)
+        )
+        for file in files {
+            XCTAssertTrue(fm.fileExists(atPath: file.path))
+        }
     }
 
     func test_uploadCoordinator_coalescesMatchingJobsAndSerializesDifferentJobs() {

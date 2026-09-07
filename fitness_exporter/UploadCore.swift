@@ -1,6 +1,6 @@
 import Foundation
 
-struct UploadDoneRecord: Codable {
+struct UploadDoneRecord: Codable, Equatable {
     let fileName: String
     let fileSize: Int64
     let lastModifiedAt: Date
@@ -188,7 +188,7 @@ enum UploadHelper {
     /// this on a background queue; SwiftUI renders only the resulting counts.
     static func inventory(in base: URL) throws -> UploadDirectoryInventory {
         let files = try listFiles(in: base)
-        let doneMap = loadDoneMap(for: base)
+        let doneMap = try UploadCompletionIndex.open(in: base).records()
         let pending = files.filter { file in
             guard let record = doneMap[file.lastPathComponent] else { return true }
             return !recordMatchesFile(record, fileURL: file)
@@ -208,89 +208,14 @@ enum UploadHelper {
         return true
     }
 
-    static func loadDoneMap(for base: URL) -> [String: UploadDoneRecord] {
-        var map: [String: UploadDoneRecord] = [:]
-        let fm = FileManager.default
-        let doneDir = base.appendingPathComponent(".done", isDirectory: true)
-
-        // Ensure the directory exists locally. If it doesn't, there's nothing to load.
-        var isDir: ObjCBool = false
-        if !fm.fileExists(atPath: doneDir.path, isDirectory: &isDir) || !isDir.boolValue {
-            return map
-        }
-
-        // For iCloud/File Provider-backed folders, coordinate the read to allow listing.
-        // Avoid skipping hidden entries inside .done.
-        let coordinator = NSFileCoordinator()
-        var coordError: NSError?
-        var entries: [URL] = []
-        coordinator.coordinate(readingItemAt: doneDir, options: [], error: &coordError) { url in
-            if let listed = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isRegularFileKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey], options: []) {
-                entries = listed
-            }
-        }
-
-        // Fallback to a direct listing if coordination didn't return anything
-        if entries.isEmpty {
-            entries = (try? fm.contentsOfDirectory(at: doneDir, includingPropertiesForKeys: [.isRegularFileKey], options: [])) ?? []
-        }
-
-        for e in entries where e.pathExtension == "json" {
-            let values = try? e.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-            let isCloud = values?.isUbiquitousItem == true
-            let isCurrent = values?.ubiquitousItemDownloadingStatus == URLUbiquitousItemDownloadingStatus.current
-
-            // If the JSON is only a placeholder in the cloud, do not hydrate. Treat as missing/invalid.
-            if isCloud && !isCurrent { continue }
-
-            if let data = try? Data(contentsOf: e), let rec = try? JSONDecoder().decode(UploadDoneRecord.self, from: data) {
-                map[rec.fileName] = rec
-            }
-        }
-        return map
+    @discardableResult
+    static func resetCompletionState(in base: URL) throws -> Int {
+        try UploadCompletionIndex.reset(in: base)
     }
 
     @discardableResult
-    static func removeLegacyDoneRecords(in base: URL) throws -> Int {
-        let doneDir = base.appendingPathComponent(".done", isDirectory: true)
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: doneDir.path) else { return 0 }
-
-        do {
-            let entries = try fm.contentsOfDirectory(
-                at: doneDir,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: []
-            )
-            var removed = 0
-            for entry in entries where entry.pathExtension == "json" {
-                try fm.removeItem(at: entry)
-                removed += 1
-            }
-            return removed
-        } catch {
-            throw UploadCoreError.completionState(error.localizedDescription)
-        }
-    }
-
-    @discardableResult
-    static func markDone(file: URL, base: URL) -> UploadDoneRecord? {
-        let fm = FileManager.default
-        let doneDir = base.appendingPathComponent(".done", isDirectory: true)
-        do {
-            try fm.createDirectory(at: doneDir, withIntermediateDirectories: true)
-            let vals = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-            let size = vals?.fileSize.map { Int64($0) } ?? 0
-            let mtime = vals?.contentModificationDate ?? Date()
-            let rec = UploadDoneRecord(fileName: file.lastPathComponent, fileSize: size, lastModifiedAt: mtime)
-            let data = try JSONEncoder().encode(rec)
-            let out = doneDir.appendingPathComponent("\(file.lastPathComponent).json")
-            try data.write(to: out, options: .atomic)
-            return rec
-        } catch {
-            CustomLogger.log("[UploadCore] Failed to write .done: \(error.localizedDescription)")
-            return nil
-        }
+    static func markDone(file: URL, base: URL) throws -> UploadDoneRecord {
+        try UploadCompletionIndex.open(in: base).markDone(file: file)
     }
 
     /// Returns true when the on-disk file matches the recorded metadata.
@@ -367,8 +292,10 @@ enum DirectoryUploader {
         }
 
         let inventory: UploadDirectoryInventory
+        let completionIndex: UploadCompletionIndex
         do {
             inventory = try UploadHelper.inventory(in: baseURL)
+            completionIndex = try UploadCompletionIndex.open(in: baseURL)
         } catch {
             CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
             return finish(error.localizedDescription)
@@ -379,10 +306,10 @@ enum DirectoryUploader {
         self.uploadQueue(
             inventory.pendingFiles,
             dirName: dir.name,
-            base: baseURL,
             session: session,
             sender: sender,
             stopOnError: stopOnError,
+            completionIndex: completionIndex,
             completion: finish
         )
     }
@@ -390,10 +317,10 @@ enum DirectoryUploader {
     private static func uploadQueue(
         _ files: [URL],
         dirName: String,
-        base: URL,
         session: ServerSession,
         sender: String,
         stopOnError: Bool,
+        completionIndex: UploadCompletionIndex,
         completion: @escaping (String?) -> Void
     ) {
         let state = UploadQueueState()
@@ -459,9 +386,13 @@ enum DirectoryUploader {
                     CustomLogger.log(
                         "[Upload][Success] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
                     )
-                    guard UploadHelper.markDone(file: file, base: base) != nil else {
-                        let message =
-                            "Upload succeeded but completion state could not be saved for \(file.lastPathComponent)"
+                    do {
+                        try completionIndex.markDone(file: file)
+                    } catch {
+                        let message = error.localizedDescription
+                        CustomLogger.log(
+                            "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(message)"
+                        )
                         if stopOnError {
                             completion(message)
                             return

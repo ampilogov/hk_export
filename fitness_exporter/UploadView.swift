@@ -103,14 +103,17 @@ private struct UploadDirectorySection: View {
                 Spacer()
 
                 Button { confirmRemoveDone = true } label: {
-                    Label("Clear .done", systemImage: "trash.slash")
+                    Label("Reset Upload History", systemImage: "trash.slash")
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.orange)
-                .disabled(isRefreshing || summary?.uploadedCount == 0 || summary == nil)
+                .disabled(
+                    isUploading || isRefreshing || summary?.uploadedCount == 0
+                        || summary == nil
+                )
             }
         }
         .onAppear(perform: loadCachedSummaryAndRefresh)
@@ -123,11 +126,14 @@ private struct UploadDirectorySection: View {
         } message: {
             Text("This only removes the directory from the list. Files are not deleted.")
         }
-        .alert("Remove .done files?", isPresented: $confirmRemoveDone) {
-            Button("Remove", role: .destructive) { removeDoneFiles() }
+        .alert("Reset upload history?", isPresented: $confirmRemoveDone) {
+            Button("Reset", role: .destructive) { resetUploadHistory() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Deletes only the metadata JSON files under .done.")
+            Text(
+                "All recordings in this directory will become pending and may "
+                    + "upload again. Recording files are not deleted."
+            )
         }
     }
 
@@ -178,7 +184,7 @@ private struct UploadDirectorySection: View {
         }
     }
 
-    private func removeDoneFiles() {
+    private func resetUploadHistory() {
         isRefreshing = true
         let directory = dir
         DispatchQueue.global(qos: .utility).async {
@@ -186,7 +192,7 @@ private struct UploadDirectorySection: View {
             if let base = UploadHelper.resolveURL(from: directory.bookmark) {
                 let hasAccess = base.startAccessingSecurityScopedResource()
                 do {
-                    try UploadHelper.removeLegacyDoneRecords(in: base)
+                    try UploadHelper.resetCompletionState(in: base)
                     error = nil
                 } catch let removalError {
                     error = removalError

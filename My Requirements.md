@@ -1,6 +1,6 @@
 # My Requirements
 
-Last updated: September 6, 2026
+Last updated: September 7, 2026
 
 This document tracks improvements to continuous Polar H10 recording. Requirements are kept separate from implementation considerations so that each item can be discussed, implemented, and verified independently.
 
@@ -38,7 +38,7 @@ Find the causes of crashes or unexpected app termination during long recordings.
 
 The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
 
-**Status:** In progress — cached off-main directory summaries and single-flight upload coordination are implemented; the transactional completion index is next
+**Status:** In progress — the HealthKit JSON processing index is the next scalability bottleneck
 
 ### R4 — Automatically reconnect and resume recording
 
@@ -91,7 +91,7 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | In progress | Replace per-file `.done` sidecars with a safely migrated transactional index |
+| R3 | File and upload efficiency | In progress | Replace the HealthKit JSON processing index with transactional SQLite state |
 | R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
 | R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
@@ -130,7 +130,6 @@ Acceptance criteria:
 Current observations:
 
 - Each recording window creates a separate `.bin` file.
-- Each uploaded file creates a separate `.done` JSON sidecar, further increasing the number of filesystem entries.
 - Uploads are serial, and each file is fully loaded, wrapped in a property list, and gzip-compressed in memory.
 - HealthKit backfill reloads and rewrites its complete JSON index after each processed recording, which scales especially poorly for a large backlog.
 - Continuous recording does not currently upload a segment when it is finalized. Upload is triggered only after the user stops recording or later by opportunistic background jobs, which iOS may delay substantially.
@@ -140,7 +139,7 @@ Current observations:
 
 Proposed approach:
 
-- Replace per-file `.done` records and the HealthKit JSON index with one transactional SQLite index.
+- Replace the HealthKit JSON index with transactional SQLite state.
 - Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
 - Extend the single-flight upload coordinator with a durable pending queue while retaining deduplication across UI, recording, and background triggers.
 - Mark every finalized five-minute package pending immediately and begin its transfer while recording continues. Permit both Wi-Fi and cellular, including expensive-network access; do not wait for recording Stop.
