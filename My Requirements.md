@@ -38,19 +38,19 @@ Find the causes of crashes or unexpected app termination during long recordings.
 
 The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
 
-**Status:** Proposed
+**Status:** In progress — current scan, completion-state, and upload entry points are mapped; begin with asynchronous cached directory summaries and single-flight coordination
 
 ### R4 — Automatically reconnect and resume recording
 
 Use the Polar SDK with one repeatable connection and stream lifecycle. Repeated Stop/Start, disconnect/reconnect, and unrelated upload activity must not leave HR/RR, ECG, or ACC partially stopped. When the Polar H10 disconnects unexpectedly, the app should reconnect automatically and resume every required stream without manual intervention. The resulting data should clearly represent any unavoidable gap.
 
-**Status:** In progress — implementation complete; one real-device reconnect sanity check remains
+**Status:** In progress — implementation complete; real-device verification is deferred to one bundled validation pass after the next implementation items
 
 ### R5 — Make notifications actionable without causing noise
 
 Short, self-healing interruptions should not immediately notify the user. Persistent interruptions, exhausted reconnection attempts, recording failures, and unexpected app termination should reliably request attention.
 
-**Status:** In progress — staged alerts are implemented; iPhone and paired-Watch delivery remain to be checked
+**Status:** In progress — staged alerts are implemented; iPhone and paired-Watch delivery are deferred to the bundled real-device validation pass
 
 ### R6 — Add fast, interactive ECG access
 
@@ -91,9 +91,9 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | Proposed | Design one durable upload coordinator and background transfer queue |
-| R4 | Auto reconnect and resume | In progress | Briefly interrupt one real H10 recording and confirm all three streams recover |
-| R5 | Notification behavior | In progress | Verify the 10-second and 60-second alerts on the iPhone and paired Apple Watch |
+| R3 | File and upload efficiency | In progress | Move directory summaries off the main thread and establish one single-flight upload coordinator |
+| R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
+| R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
 | R7 | Other inefficiencies | Proposed | Reassess after R2–R3 |
 | R8 | Reset-button safety | Proposed | Define confirmation, busy-state, and error-result behavior for both reset controls |
