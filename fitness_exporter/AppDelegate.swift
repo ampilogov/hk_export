@@ -141,8 +141,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         label: String
     ) {
         let completionGate = BackgroundTaskCompletionGate(task: task)
+        let uploadCancellation = UploadCancellationToken()
         task.expirationHandler = {
             CustomLogger.log("[App] Background \(label) task is about to expire")
+            uploadCancellation.cancel()
             completionGate.complete(success: false)
         }
 
@@ -150,7 +152,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             CustomLogger.log(
                 "[App] Continuous recording is active; deferring HealthKit reads during \(label)"
             )
-            runBackgroundUpload(completionGate: completionGate, label: label)
+            runBackgroundUpload(
+                completionGate: completionGate,
+                cancellationToken: uploadCancellation,
+                label: label
+            )
             return
         }
 
@@ -168,6 +174,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             }
             self.runBackgroundUpload(
                 completionGate: completionGate,
+                cancellationToken: uploadCancellation,
                 label: label,
                 priorError: status
             )
@@ -176,10 +183,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     private func runBackgroundUpload(
         completionGate: BackgroundTaskCompletionGate,
+        cancellationToken: UploadCancellationToken,
         label: String,
         priorError: String? = nil
     ) {
-        DirectoryUploader.uploadAllFromStore(stopOnError: false) { status in
+        DirectoryUploader.uploadAllFromStore(
+            stopOnError: false,
+            priority: .background,
+            cancellationToken: cancellationToken
+        ) { status in
             guard !completionGate.isCompleted else { return }
             CustomLogger.log(
                 "[App] Background \(label) file upload finished: \(status ?? "nil")"

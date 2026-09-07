@@ -337,6 +337,24 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(afterMutation.pendingCount, fileCount - uploadedCount + 1)
     }
 
+    func test_uploadInventory_cancelledFailsExplicitly() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let token = UploadCancellationToken()
+        token.cancel()
+
+        XCTAssertThrowsError(
+            try UploadHelper.inventory(in: base, cancellationToken: token)
+        ) { error in
+            guard case UploadCoreError.cancelled = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
     func test_uploadCompletionIndex_migratesAndRemovesVerifiedLegacySidecars() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory
@@ -427,6 +445,13 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: invalidSidecar.path))
         XCTAssertTrue(fm.fileExists(atPath: validSidecar.path))
         XCTAssertEqual(try Data(contentsOf: recording), recordingBytes)
+
+        XCTAssertEqual(try UploadHelper.resetCompletionState(in: base), 2)
+        let recoveredInventory = try UploadHelper.inventory(in: base)
+        XCTAssertEqual(recoveredInventory.uploadedCount, 0)
+        XCTAssertEqual(recoveredInventory.pendingCount, 1)
+        XCTAssertFalse(fm.fileExists(atPath: invalidSidecar.path))
+        XCTAssertFalse(fm.fileExists(atPath: validSidecar.path))
     }
 
     func test_uploadCompletionIndex_resetMakesFilesPendingWithoutDeletingRecordings() throws {
@@ -457,10 +482,45 @@ final class SensorBagCompatibilityTests: XCTestCase {
         }
     }
 
-    func test_uploadCoordinator_coalescesMatchingJobsAndSerializesDifferentJobs() {
+    func test_uploadCompletionIndex_interruptedResetResumesBeforeMigration() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let indexedFile = base.appendingPathComponent("indexed.bin")
+        let legacyFile = base.appendingPathComponent("legacy.bin")
+        try Data([1]).write(to: indexedFile)
+        try Data([2]).write(to: legacyFile)
+        try UploadHelper.markDone(file: indexedFile, base: base)
+
+        let legacyValues = try legacyFile.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        let legacyRecord = UploadDoneRecord(
+            fileName: legacyFile.lastPathComponent,
+            fileSize: Int64(try XCTUnwrap(legacyValues.fileSize)),
+            lastModifiedAt: try XCTUnwrap(legacyValues.contentModificationDate)
+        )
+        let doneDirectory = base.appendingPathComponent(".done", isDirectory: true)
+        let sidecar = doneDirectory.appendingPathComponent("legacy.bin.json")
+        try JSONEncoder().encode(legacyRecord).write(to: sidecar)
+        let resetMarker = doneDirectory.appendingPathComponent("reset-in-progress")
+        try Data().write(to: resetMarker)
+
+        let inventory = try UploadHelper.inventory(in: base)
+
+        XCTAssertEqual(inventory.uploadedCount, 0)
+        XCTAssertEqual(inventory.pendingCount, 2)
+        XCTAssertFalse(fm.fileExists(atPath: sidecar.path))
+        XCTAssertFalse(fm.fileExists(atPath: resetMarker.path))
+    }
+
+    func test_uploadCoordinator_activeMatchingJobsScheduleOneSerializedRerun() {
         let coordinator = UploadSingleFlightCoordinator()
         let allCompletions = expectation(description: "all callers completed")
-        allCompletions.expectedFulfillmentCount = 3
+        allCompletions.expectedFulfillmentCount = 4
         let stateLock = NSLock()
         var operationStarts = 0
         var runningOperations = 0
@@ -497,7 +557,11 @@ final class SensorBagCompatibilityTests: XCTestCase {
             operation: operation()
         ) { _ in allCompletions.fulfill() }
         coordinator.submit(
-            key: "different",
+            key: "same",
+            operation: operation()
+        ) { _ in allCompletions.fulfill() }
+        coordinator.submit(
+            key: "same",
             operation: operation()
         ) { _ in allCompletions.fulfill() }
 
@@ -508,6 +572,173 @@ final class SensorBagCompatibilityTests: XCTestCase {
         stateLock.unlock()
         XCTAssertEqual(finalStarts, 2)
         XCTAssertEqual(finalMaximum, 1)
+    }
+
+    func test_uploadCoordinator_foregroundPreemptsCancellableBackgroundJob() {
+        let coordinator = UploadSingleFlightCoordinator()
+        let backgroundStarted = expectation(description: "background started")
+        let backgroundCancelled = expectation(description: "background cancelled")
+        let foregroundStarted = expectation(description: "foreground started")
+        let allCompletions = expectation(description: "both callers completed")
+        allCompletions.expectedFulfillmentCount = 2
+        let stateLock = NSLock()
+        var finishBackground: UploadSingleFlightCoordinator.Completion?
+
+        coordinator.submit(
+            key: "background",
+            priority: .background,
+            cancel: { backgroundCancelled.fulfill() },
+            operation: { finish in
+                stateLock.lock()
+                finishBackground = finish
+                stateLock.unlock()
+                backgroundStarted.fulfill()
+            }
+        ) { _ in allCompletions.fulfill() }
+        wait(for: [backgroundStarted], timeout: 1)
+
+        coordinator.submit(
+            key: "foreground",
+            priority: .foreground,
+            operation: { finish in
+                foregroundStarted.fulfill()
+                finish(nil)
+            }
+        ) { _ in allCompletions.fulfill() }
+
+        wait(for: [backgroundCancelled], timeout: 1)
+        stateLock.lock()
+        let finish = finishBackground
+        stateLock.unlock()
+        finish?("Upload cancelled")
+
+        wait(for: [foregroundStarted, allCompletions], timeout: 2)
+    }
+
+    func test_uploadCoordinator_skipsCancelledPendingJob() {
+        let coordinator = UploadSingleFlightCoordinator()
+        let completionCalled = expectation(description: "completion called")
+        let token = UploadCancellationToken()
+        token.cancel()
+
+        coordinator.submit(
+            key: "cancelled",
+            shouldRun: { !token.isCancelled },
+            operation: { _ in
+                XCTFail("Cancelled operation must not start")
+            }
+        ) { status in
+            XCTAssertEqual(status, "Upload cancelled")
+            completionCalled.fulfill()
+        }
+
+        wait(for: [completionCalled], timeout: 1)
+    }
+
+    func test_uploadInventoryRefresh_coalescesAndCachesScans() {
+        let scanStarted = expectation(description: "scan started")
+        let coalescedCompletions = expectation(
+            description: "coalesced refresh completions"
+        )
+        coalescedCompletions.expectedFulfillmentCount = 2
+        let releaseScan = DispatchSemaphore(value: 0)
+        let stateLock = NSLock()
+        var scanCount = 0
+        let expected = UploadDirectorySummary(
+            totalCount: 50_000,
+            pendingCount: 20,
+            uploadedCount: 49_980
+        )
+        let coordinator = UploadInventoryRefreshCoordinator { _ in
+            stateLock.lock()
+            scanCount += 1
+            stateLock.unlock()
+            scanStarted.fulfill()
+            releaseScan.wait()
+            return .success(expected)
+        }
+        let directory = UploadDirectory(
+            id: UUID(),
+            name: "Test",
+            bookmark: Data()
+        )
+
+        coordinator.refresh(directory: directory) { result in
+            XCTAssertEqual(try? result.get(), expected)
+            coalescedCompletions.fulfill()
+        }
+        coordinator.refresh(directory: directory) { result in
+            XCTAssertEqual(try? result.get(), expected)
+            coalescedCompletions.fulfill()
+        }
+        wait(for: [scanStarted], timeout: 1)
+        releaseScan.signal()
+        wait(for: [coalescedCompletions], timeout: 2)
+
+        let cachedCompletion = expectation(description: "cached completion")
+        coordinator.refresh(directory: directory) { result in
+            XCTAssertEqual(try? result.get(), expected)
+            cachedCompletion.fulfill()
+        }
+        wait(for: [cachedCompletion], timeout: 1)
+
+        stateLock.lock()
+        let finalScanCount = scanCount
+        stateLock.unlock()
+        XCTAssertEqual(finalScanCount, 1)
+    }
+
+    func test_uploadInventoryRefresh_forceDuringScanRunsFreshFollowUp() {
+        let firstScanStarted = expectation(description: "first scan started")
+        let firstCompletion = expectation(description: "first completion")
+        let forcedCompletion = expectation(description: "forced completion")
+        let releaseFirstScan = DispatchSemaphore(value: 0)
+        let stateLock = NSLock()
+        var scanCount = 0
+        let oldSummary = UploadDirectorySummary(
+            totalCount: 1,
+            pendingCount: 1,
+            uploadedCount: 0
+        )
+        let freshSummary = UploadDirectorySummary(
+            totalCount: 2,
+            pendingCount: 0,
+            uploadedCount: 2
+        )
+        let coordinator = UploadInventoryRefreshCoordinator { _ in
+            stateLock.lock()
+            scanCount += 1
+            let currentScan = scanCount
+            stateLock.unlock()
+            if currentScan == 1 {
+                firstScanStarted.fulfill()
+                releaseFirstScan.wait()
+                return .success(oldSummary)
+            }
+            return .success(freshSummary)
+        }
+        let directory = UploadDirectory(
+            id: UUID(),
+            name: "Test",
+            bookmark: Data()
+        )
+
+        coordinator.refresh(directory: directory) { result in
+            XCTAssertEqual(try? result.get(), oldSummary)
+            firstCompletion.fulfill()
+        }
+        wait(for: [firstScanStarted], timeout: 1)
+        coordinator.refresh(directory: directory, force: true) { result in
+            XCTAssertEqual(try? result.get(), freshSummary)
+            forcedCompletion.fulfill()
+        }
+        releaseFirstScan.signal()
+
+        wait(for: [firstCompletion, forcedCompletion], timeout: 2)
+        stateLock.lock()
+        let finalScanCount = scanCount
+        stateLock.unlock()
+        XCTAssertEqual(finalScanCount, 2)
     }
 
     func test_uploadSummaryCache_roundTripsByDirectory() throws {

@@ -12,6 +12,7 @@ enum UploadCoreError: Error, CustomStringConvertible, LocalizedError {
     case fileReadFailed(String)
     case completionState(String)
     case network(String)
+    case cancelled
 
     var description: String {
         switch self {
@@ -22,6 +23,7 @@ enum UploadCoreError: Error, CustomStringConvertible, LocalizedError {
         case .completionState(let message):
             return "Failed to update upload completion state: \(message)"
         case .network(let msg): return msg
+        case .cancelled: return "Upload cancelled"
         }
     }
 
@@ -85,6 +87,188 @@ enum UploadSummaryCache {
     }
 }
 
+enum UploadJobPriority: Int, Comparable {
+    case background
+    case foreground
+
+    static func < (lhs: UploadJobPriority, rhs: UploadJobPriority) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+final class UploadCancellationToken {
+    let id = UUID()
+
+    private let lock = NSLock()
+    private var cancelled = false
+    private var activeTask: URLSessionTask?
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let task = activeTask
+        lock.unlock()
+        task?.cancel()
+    }
+
+    @discardableResult
+    func register(_ task: URLSessionTask) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        activeTask = task
+        return true
+    }
+
+    func clearActiveTask() {
+        lock.lock()
+        activeTask = nil
+        lock.unlock()
+    }
+}
+
+final class UploadInventoryRefreshCoordinator {
+    static let shared = UploadInventoryRefreshCoordinator()
+
+    typealias Completion = (Result<UploadDirectorySummary, Error>) -> Void
+    typealias Scanner = (UploadDirectory) -> Result<UploadDirectorySummary, Error>
+
+    private struct CachedResult {
+        let result: Result<UploadDirectorySummary, Error>
+        let completedAt: Date
+
+        var isSuccess: Bool {
+            if case .success = result { return true }
+            return false
+        }
+    }
+
+    private struct InFlightRefresh {
+        let directory: UploadDirectory
+        var completions: [Completion]
+        var forcedFollowUpCompletions: [Completion]
+    }
+
+    private let stateQueue = DispatchQueue(
+        label: "com.fitness_exporter.uploadInventory.state"
+    )
+    private let workerQueue = DispatchQueue(
+        label: "com.fitness_exporter.uploadInventory.worker",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    private let scanner: Scanner
+    private var cachedResults: [UUID: CachedResult] = [:]
+    private var inFlight: [UUID: InFlightRefresh] = [:]
+
+    convenience init() {
+        self.init(scanner: Self.scan)
+    }
+
+    init(scanner: @escaping Scanner) {
+        self.scanner = scanner
+    }
+
+    func refresh(
+        directory: UploadDirectory,
+        force: Bool = false,
+        minimumInterval: TimeInterval = 60,
+        completion: @escaping Completion
+    ) {
+        stateQueue.async { [self] in
+            if !force, let cached = cachedResults[directory.id] {
+                let allowedAge = cached.isSuccess ? minimumInterval : 5
+                if Date().timeIntervalSince(cached.completedAt) < allowedAge {
+                    DispatchQueue.main.async {
+                        completion(cached.result)
+                    }
+                    return
+                }
+            }
+
+            if var existing = inFlight[directory.id] {
+                if force {
+                    existing.forcedFollowUpCompletions.append(completion)
+                } else {
+                    existing.completions.append(completion)
+                }
+                inFlight[directory.id] = existing
+                return
+            }
+            inFlight[directory.id] = InFlightRefresh(
+                directory: directory,
+                completions: [completion],
+                forcedFollowUpCompletions: []
+            )
+            startScan(directory)
+        }
+    }
+
+    func remove(directoryID: UUID) {
+        stateQueue.async { [self] in
+            cachedResults.removeValue(forKey: directoryID)
+        }
+    }
+
+    private func finish(
+        directoryID: UUID,
+        result: Result<UploadDirectorySummary, Error>
+    ) {
+        stateQueue.async { [self] in
+            cachedResults[directoryID] = CachedResult(
+                result: result,
+                completedAt: Date()
+            )
+            guard let completed = inFlight[directoryID] else { return }
+            let completions = completed.completions
+            if completed.forcedFollowUpCompletions.isEmpty {
+                inFlight.removeValue(forKey: directoryID)
+            } else {
+                inFlight[directoryID] = InFlightRefresh(
+                    directory: completed.directory,
+                    completions: completed.forcedFollowUpCompletions,
+                    forcedFollowUpCompletions: []
+                )
+                startScan(completed.directory)
+            }
+            DispatchQueue.main.async {
+                for completion in completions {
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    private func startScan(_ directory: UploadDirectory) {
+        workerQueue.async { [self] in
+            finish(directoryID: directory.id, result: scanner(directory))
+        }
+    }
+
+    private static func scan(
+        _ directory: UploadDirectory
+    ) -> Result<UploadDirectorySummary, Error> {
+        guard let url = UploadHelper.resolveURL(from: directory.bookmark) else {
+            return .failure(UploadCoreError.invalidBookmark)
+        }
+        let hasAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return Result {
+            try UploadHelper.inventory(in: url).summary
+        }
+    }
+}
+
 final class UploadSingleFlightCoordinator {
     static let shared = UploadSingleFlightCoordinator()
 
@@ -94,7 +278,10 @@ final class UploadSingleFlightCoordinator {
     private struct Job {
         let id = UUID()
         let key: String
+        var priority: UploadJobPriority
         let operation: Operation
+        let shouldRun: () -> Bool
+        let cancel: (() -> Void)?
         var completions: [Completion]
     }
 
@@ -110,28 +297,90 @@ final class UploadSingleFlightCoordinator {
 
     func submit(
         key: String,
+        priority: UploadJobPriority = .foreground,
+        shouldRun: @escaping () -> Bool = { true },
+        cancel: (() -> Void)? = nil,
         operation: @escaping Operation,
         completion: @escaping Completion
     ) {
         stateQueue.async { [self] in
             if activeJob?.key == key {
-                activeJob?.completions.append(completion)
+                let rerun = Job(
+                    key: key,
+                    priority: priority,
+                    operation: operation,
+                    shouldRun: shouldRun,
+                    cancel: cancel,
+                    completions: [completion]
+                )
+                enqueueOrCoalesce(rerun)
+                preemptActiveJobIfNeeded(for: priority)
                 return
             }
             if let index = pendingJobs.firstIndex(where: { $0.key == key }) {
                 pendingJobs[index].completions.append(completion)
+                if priority > pendingJobs[index].priority {
+                    var promoted = pendingJobs.remove(at: index)
+                    promoted.priority = priority
+                    enqueue(promoted)
+                }
                 return
             }
-            pendingJobs.append(
-                Job(key: key, operation: operation, completions: [completion])
+            let job = Job(
+                key: key,
+                priority: priority,
+                operation: operation,
+                shouldRun: shouldRun,
+                cancel: cancel,
+                completions: [completion]
             )
+            enqueue(job)
+            preemptActiveJobIfNeeded(for: priority)
             startNextIfNeeded()
         }
     }
 
+    private func enqueueOrCoalesce(_ job: Job) {
+        if let index = pendingJobs.firstIndex(where: { $0.key == job.key }) {
+            pendingJobs[index].completions.append(contentsOf: job.completions)
+            if job.priority > pendingJobs[index].priority {
+                var promoted = pendingJobs.remove(at: index)
+                promoted.priority = job.priority
+                enqueue(promoted)
+            }
+            return
+        }
+        enqueue(job)
+    }
+
+    private func enqueue(_ job: Job) {
+        if let index = pendingJobs.firstIndex(
+            where: { $0.priority < job.priority }
+        ) {
+            pendingJobs.insert(job, at: index)
+        } else {
+            pendingJobs.append(job)
+        }
+    }
+
+    private func preemptActiveJobIfNeeded(for priority: UploadJobPriority) {
+        guard let activeJob, priority > activeJob.priority else { return }
+        activeJob.cancel?()
+    }
+
     private func startNextIfNeeded() {
-        guard activeJob == nil, !pendingJobs.isEmpty else { return }
-        activeJob = pendingJobs.removeFirst()
+        guard activeJob == nil else { return }
+        while !pendingJobs.isEmpty {
+            let next = pendingJobs.removeFirst()
+            guard next.shouldRun() else {
+                for completion in next.completions {
+                    completion("Upload cancelled")
+                }
+                continue
+            }
+            activeJob = next
+            break
+        }
         guard let job = activeJob else { return }
         workerQueue.async { [weak self] in
             job.operation { result in
@@ -160,15 +409,20 @@ enum UploadHelper {
         return try? URL(resolvingBookmarkData: bookmark, options: options, relativeTo: nil, bookmarkDataIsStale: &isStale)
     }
 
-    static func listFiles(in base: URL) throws -> [URL] {
+    static func listFiles(
+        in base: URL,
+        shouldCancel: () -> Bool = { false }
+    ) throws -> [URL] {
         let fm = FileManager.default
         do {
+            if shouldCancel() { throw UploadCoreError.cancelled }
             let contents = try fm.contentsOfDirectory(
                 at: base,
                 includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
                 options: [.skipsHiddenFiles]
             )
             let filesOnly = try contents.filter { url in
+                if shouldCancel() { throw UploadCoreError.cancelled }
                 let values = try url.resourceValues(
                     forKeys: [.isRegularFileKey, .isDirectoryKey])
                 return (values.isRegularFile ?? false)
@@ -178,6 +432,9 @@ enum UploadHelper {
                 $0.lastPathComponent < $1.lastPathComponent
             }
         } catch {
+            if let uploadError = error as? UploadCoreError {
+                throw uploadError
+            }
             throw UploadCoreError.directoryListFailed(
                 "\(base.lastPathComponent): \(error.localizedDescription)"
             )
@@ -186,12 +443,27 @@ enum UploadHelper {
 
     /// Build one immutable snapshot for both the UI and uploader. Callers run
     /// this on a background queue; SwiftUI renders only the resulting counts.
-    static func inventory(in base: URL) throws -> UploadDirectoryInventory {
-        let files = try listFiles(in: base)
-        let doneMap = try UploadCompletionIndex.open(in: base).records()
-        let pending = files.filter { file in
-            guard let record = doneMap[file.lastPathComponent] else { return true }
-            return !recordMatchesFile(record, fileURL: file)
+    static func inventory(
+        in base: URL,
+        cancellationToken: UploadCancellationToken? = nil
+    ) throws -> UploadDirectoryInventory {
+        let shouldCancel = { cancellationToken?.isCancelled == true }
+        let files = try listFiles(in: base, shouldCancel: shouldCancel)
+        let doneMap = try UploadCompletionIndex.records(
+            in: base,
+            shouldCancel: shouldCancel
+        )
+        var pending: [URL] = []
+        pending.reserveCapacity(files.count)
+        for file in files {
+            if shouldCancel() { throw UploadCoreError.cancelled }
+            guard let record = doneMap[file.lastPathComponent] else {
+                pending.append(file)
+                continue
+            }
+            if !recordMatchesFile(record, fileURL: file) {
+                pending.append(file)
+            }
         }
         return UploadDirectoryInventory(
             totalCount: files.count,
@@ -215,7 +487,7 @@ enum UploadHelper {
 
     @discardableResult
     static func markDone(file: URL, base: URL) throws -> UploadDoneRecord {
-        try UploadCompletionIndex.open(in: base).markDone(file: file)
+        try UploadCompletionIndex.markDone(file: file, in: base)
     }
 
     /// Returns true when the on-disk file matches the recorded metadata.
@@ -245,18 +517,27 @@ enum DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool = true,
+        priority: UploadJobPriority = .foreground,
+        cancellationToken: UploadCancellationToken? = nil,
         completion: @escaping (String?) -> Void
     ) {
-        let key =
+        var key =
             "directory:\(dir.id.uuidString):\(stopOnError):\(server):\(sender)"
+        if let cancellationToken {
+            key += ":request:\(cancellationToken.id.uuidString)"
+        }
         UploadSingleFlightCoordinator.shared.submit(
             key: key,
+            priority: priority,
+            shouldRun: { cancellationToken?.isCancelled != true },
+            cancel: cancellationToken.map { token in { token.cancel() } },
             operation: { finish in
                 uploadAllNow(
                     dir: dir,
                     server: server,
                     sender: sender,
                     stopOnError: stopOnError,
+                    cancellationToken: cancellationToken,
                     completion: finish
                 )
             },
@@ -269,8 +550,12 @@ enum DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool,
+        cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
+        guard cancellationToken?.isCancelled != true else {
+            return completion("Upload cancelled")
+        }
         guard let baseURL = UploadHelper.resolveURL(from: dir.bookmark) else {
             return completion(UploadCoreError.invalidBookmark.description)
         }
@@ -292,10 +577,11 @@ enum DirectoryUploader {
         }
 
         let inventory: UploadDirectoryInventory
-        let completionIndex: UploadCompletionIndex
         do {
-            inventory = try UploadHelper.inventory(in: baseURL)
-            completionIndex = try UploadCompletionIndex.open(in: baseURL)
+            inventory = try UploadHelper.inventory(
+                in: baseURL,
+                cancellationToken: cancellationToken
+            )
         } catch {
             CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
             return finish(error.localizedDescription)
@@ -305,27 +591,33 @@ enum DirectoryUploader {
         let session = ServerSession.getSession(server: server)
         self.uploadQueue(
             inventory.pendingFiles,
+            baseURL: baseURL,
             dirName: dir.name,
             session: session,
             sender: sender,
             stopOnError: stopOnError,
-            completionIndex: completionIndex,
+            cancellationToken: cancellationToken,
             completion: finish
         )
     }
 
     private static func uploadQueue(
         _ files: [URL],
+        baseURL: URL,
         dirName: String,
         session: ServerSession,
         sender: String,
         stopOnError: Bool,
-        completionIndex: UploadCompletionIndex,
+        cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
         let state = UploadQueueState()
 
         func processNext() {
+            guard cancellationToken?.isCancelled != true else {
+                completion("Upload cancelled")
+                return
+            }
             while state.nextIndex < files.count {
                 let file = files[state.nextIndex]
                 state.nextIndex += 1
@@ -366,7 +658,8 @@ enum DirectoryUploader {
                     fileName: file.lastPathComponent,
                     fileBytes: data,
                     fullPath: file.path,
-                    sender: sender
+                    sender: sender,
+                    cancellationToken: cancellationToken
                 ) { error in
                     if let error {
                         CustomLogger.log(
@@ -387,7 +680,7 @@ enum DirectoryUploader {
                         "[Upload][Success] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
                     )
                     do {
-                        try completionIndex.markDone(file: file)
+                        try UploadHelper.markDone(file: file, base: baseURL)
                     } catch {
                         let message = error.localizedDescription
                         CustomLogger.log(
@@ -463,6 +756,7 @@ final class UploadDirectoriesStore: ObservableObject {
     func remove(_ dir: UploadDirectory) {
         dirs.removeAll { $0.id == dir.id }
         UploadSummaryCache.remove(directoryID: dir.id)
+        UploadInventoryRefreshCoordinator.shared.remove(directoryID: dir.id)
     }
 
     private func persist() {
@@ -492,18 +786,27 @@ extension DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool = true,
+        priority: UploadJobPriority = .foreground,
+        cancellationToken: UploadCancellationToken? = nil,
         completion: @escaping (String?) -> Void
     ) {
         let ids = dirs.map { $0.id.uuidString }.sorted().joined(separator: ",")
-        let key = "directories:\(ids):\(stopOnError):\(server):\(sender)"
+        var key = "directories:\(ids):\(stopOnError):\(server):\(sender)"
+        if let cancellationToken {
+            key += ":request:\(cancellationToken.id.uuidString)"
+        }
         UploadSingleFlightCoordinator.shared.submit(
             key: key,
+            priority: priority,
+            shouldRun: { cancellationToken?.isCancelled != true },
+            cancel: cancellationToken.map { token in { token.cancel() } },
             operation: { finish in
                 uploadAllDirectoriesNow(
                     dirs,
                     server: server,
                     sender: sender,
                     stopOnError: stopOnError,
+                    cancellationToken: cancellationToken,
                     completion: finish
                 )
             },
@@ -516,16 +819,21 @@ extension DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool,
+        cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
         let state = UploadQueueState()
         func loop(_ index: Int) {
+            guard cancellationToken?.isCancelled != true else {
+                return completion("Upload cancelled")
+            }
             if index >= dirs.count { return completion(state.firstError) }
             uploadAllNow(
                 dir: dirs[index],
                 server: server,
                 sender: sender,
-                stopOnError: stopOnError
+                stopOnError: stopOnError,
+                cancellationToken: cancellationToken
             ) { error in
                 if let error {
                     if stopOnError { return completion(error) }
@@ -537,13 +845,26 @@ extension DirectoryUploader {
         loop(0)
     }
 
-    static func uploadAllFromStore(stopOnError: Bool = true, completion: @escaping (String?) -> Void) {
+    static func uploadAllFromStore(
+        stopOnError: Bool = true,
+        priority: UploadJobPriority = .foreground,
+        cancellationToken: UploadCancellationToken? = nil,
+        completion: @escaping (String?) -> Void
+    ) {
         guard let cfg = getServerAndSender() else {
             return completion("Upload server or sender is not configured")
         }
         let store = UploadDirectoriesStore()
         let dirs = store.dirs
         guard !dirs.isEmpty else { return completion(nil) }
-        uploadAllDirectories(dirs, server: cfg.server, sender: cfg.sender, stopOnError: stopOnError, completion: completion)
+        uploadAllDirectories(
+            dirs,
+            server: cfg.server,
+            sender: cfg.sender,
+            stopOnError: stopOnError,
+            priority: priority,
+            cancellationToken: cancellationToken,
+            completion: completion
+        )
     }
 }

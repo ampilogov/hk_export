@@ -58,15 +58,20 @@ private struct UploadDirectorySection: View {
     @State private var summary: UploadDirectorySummary?
     @State private var isRefreshing = false
     @State private var refreshID = UUID()
-    @State private var errorText: String?
+    @State private var inventoryErrorText: String?
+    @State private var actionErrorText: String?
     @State private var isUploading: Bool = false
     @State private var confirmRemoveDir: Bool = false
     @State private var confirmRemoveDone: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let errorText {
-                Text(errorText).foregroundColor(.red)
+            if let actionErrorText {
+                Text(actionErrorText).foregroundColor(.red)
+            }
+            if let inventoryErrorText,
+               inventoryErrorText != actionErrorText {
+                Text(inventoryErrorText).foregroundColor(.red)
             }
 
             HStack {
@@ -76,9 +81,12 @@ private struct UploadDirectorySection: View {
                         ProgressView()
                             .controlSize(.small)
                     }
-                } else {
+                } else if isRefreshing {
                     ProgressView("Scanning…")
                         .controlSize(.small)
+                } else {
+                    Text("Counts unavailable")
+                        .foregroundColor(.secondary)
                 }
                 Spacer()
                 Button("Upload", action: uploadAll)
@@ -111,8 +119,9 @@ private struct UploadDirectorySection: View {
                 .controlSize(.small)
                 .tint(.orange)
                 .disabled(
-                    isUploading || isRefreshing || summary?.uploadedCount == 0
-                        || summary == nil
+                    isUploading || isRefreshing
+                        || ((summary?.uploadedCount ?? 0) == 0
+                            && inventoryErrorText == nil)
                 )
             }
         }
@@ -144,42 +153,30 @@ private struct UploadDirectorySection: View {
         refreshInventory()
     }
 
-    private func refreshInventory() {
+    private func refreshInventory(force: Bool = false) {
         let requestID = UUID()
         refreshID = requestID
         isRefreshing = true
         let directory = dir
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<UploadDirectorySummary, Error>
-            if let url = UploadHelper.resolveURL(from: directory.bookmark) {
-                let hasAccess = url.startAccessingSecurityScopedResource()
-                result = Result {
-                    try UploadHelper.inventory(in: url).summary
-                }
-                if hasAccess {
-                    url.stopAccessingSecurityScopedResource()
-                }
-            } else {
-                result = .failure(UploadCoreError.invalidBookmark)
-            }
-
-            DispatchQueue.main.async {
-                guard self.refreshID == requestID else { return }
-                self.isRefreshing = false
-                switch result {
-                case .success(let newSummary):
-                    self.summary = newSummary
-                    UploadSummaryCache.store(
-                        newSummary,
-                        directoryID: directory.id
-                    )
-                    self.errorText = nil
-                case .failure(let error):
-                    self.summary = nil
-                    self.errorText = error.localizedDescription
-                    CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
-                }
+        UploadInventoryRefreshCoordinator.shared.refresh(
+            directory: directory,
+            force: force
+        ) { result in
+            guard self.refreshID == requestID else { return }
+            self.isRefreshing = false
+            switch result {
+            case .success(let newSummary):
+                self.summary = newSummary
+                UploadSummaryCache.store(
+                    newSummary,
+                    directoryID: directory.id
+                )
+                self.inventoryErrorText = nil
+            case .failure(let error):
+                self.summary = nil
+                self.inventoryErrorText = error.localizedDescription
+                CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
             }
         }
     }
@@ -207,10 +204,11 @@ private struct UploadDirectorySection: View {
             DispatchQueue.main.async {
                 if let error {
                     self.isRefreshing = false
-                    self.errorText = error.localizedDescription
+                    self.actionErrorText = error.localizedDescription
                     CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
                 } else {
-                    self.refreshInventory()
+                    self.actionErrorText = nil
+                    self.refreshInventory(force: true)
                 }
             }
         }
@@ -220,16 +218,19 @@ private struct UploadDirectorySection: View {
 
     private func uploadAll() {
         guard !isUploading else { return }
-        guard let cfg = DirectoryUploader.getServerAndSender() else { self.errorText = "Server URL or Sender is empty"; return }
+        guard let cfg = DirectoryUploader.getServerAndSender() else {
+            actionErrorText = "Server URL or Sender is empty"
+            return
+        }
 
         // Prepare list of pending files
         isUploading = true
-        errorText = nil
+        actionErrorText = nil
         DirectoryUploader.uploadAll(dir: dir, server: cfg.server, sender: cfg.sender, stopOnError: true) { err in
             DispatchQueue.main.async {
-                if let err = err { self.errorText = err }
-                self.refreshInventory()
+                self.actionErrorText = err
                 self.isUploading = false
+                self.refreshInventory(force: true)
             }
         }
     }

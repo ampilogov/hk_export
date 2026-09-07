@@ -193,6 +193,7 @@ class ServerSession {
         fullPath: String,
         sender: String,
         timeout: TimeInterval? = 60,
+        cancellationToken: UploadCancellationToken? = nil,
         completion: @escaping (String?) -> Void
     ) {
         guard let baseURL = URL(string: server) else {
@@ -231,7 +232,11 @@ class ServerSession {
             return completion("Failed to encode upload payload: \(error.localizedDescription)")
         }
 
-        performRequestWithRetry(request, attempts: 4) { _, response, error in
+        performRequestWithRetry(
+            request,
+            attempts: 4,
+            cancellationToken: cancellationToken
+        ) { _, response, error in
             if let error = error {
                 CustomLogger.log("Upload client error: \(error.localizedDescription)")
                 return completion("Client error: \(error.localizedDescription)")
@@ -297,13 +302,23 @@ class ServerSession {
         initialDelay: TimeInterval = 1.0,
         backoff: Double = 2.0,
         maxDelay: TimeInterval = 10.0,
+        cancellationToken: UploadCancellationToken? = nil,
         completion: @escaping (Data?, URLResponse?, Error?) -> Void
     ) {
         func attempt(_ index: Int, currentDelay: TimeInterval) {
+            guard cancellationToken?.isCancelled != true else {
+                completion(nil, nil, URLError(.cancelled))
+                return
+            }
             let task = self.session.dataTask(with: request) { data, response, error in
+                cancellationToken?.clearActiveTask()
                 if error == nil, let http = response as? HTTPURLResponse,
                    (200...299).contains(http.statusCode) {
                     return completion(data, response, nil)
+                }
+
+                if cancellationToken?.isCancelled == true {
+                    return completion(data, response, URLError(.cancelled))
                 }
 
                 var retryable = false
@@ -324,6 +339,10 @@ class ServerSession {
                 } else {
                     completion(data, response, error)
                 }
+            }
+            guard cancellationToken?.register(task) != false else {
+                completion(nil, nil, URLError(.cancelled))
+                return
             }
             task.resume()
         }

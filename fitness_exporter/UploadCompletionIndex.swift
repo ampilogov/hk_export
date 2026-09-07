@@ -11,28 +11,47 @@ private let sqliteTransientDestructor = unsafeBitCast(
 /// state follows the selected recording directory.
 final class UploadCompletionIndex {
     static let databaseFileName = "upload-index.sqlite3"
+    private static let resetMarkerFileName = "reset-in-progress"
 
-    private static let openLock = NSLock()
+    private static let operationLock = NSLock()
 
     private let doneDirectoryURL: URL
     private let databaseURL: URL
+    private let shouldCancel: () -> Bool
     private var database: OpaquePointer?
 
-    static func open(in baseURL: URL) throws -> UploadCompletionIndex {
-        openLock.lock()
-        defer { openLock.unlock() }
-        return try UploadCompletionIndex(baseURL: baseURL, migrateLegacyRecords: true)
+    static func records(
+        in baseURL: URL,
+        shouldCancel: @escaping () -> Bool = { false }
+    ) throws -> [String: UploadDoneRecord] {
+        try withCoordinatedIndex(
+            in: baseURL,
+            migrateLegacyRecords: true,
+            shouldCancel: shouldCancel
+        ) {
+            try $0.records()
+        }
+    }
+
+    @discardableResult
+    static func markDone(file: URL, in baseURL: URL) throws -> UploadDoneRecord {
+        try withCoordinatedIndex(
+            in: baseURL,
+            migrateLegacyRecords: true,
+            shouldCancel: { false }
+        ) {
+            try $0.markDone(file: file)
+        }
     }
 
     static func reset(in baseURL: URL) throws -> Int {
-        openLock.lock()
-        defer { openLock.unlock() }
-
-        let index = try UploadCompletionIndex(
-            baseURL: baseURL,
-            migrateLegacyRecords: false
-        )
-        return try index.reset()
+        try withCoordinatedIndex(
+            in: baseURL,
+            migrateLegacyRecords: false,
+            shouldCancel: { false }
+        ) {
+            try $0.reset()
+        }
     }
 
     static func indexURL(in baseURL: URL) -> URL {
@@ -41,21 +60,78 @@ final class UploadCompletionIndex {
             .appendingPathComponent(databaseFileName, isDirectory: false)
     }
 
-    private init(baseURL: URL, migrateLegacyRecords: Bool) throws {
-        doneDirectoryURL = baseURL.appendingPathComponent(
+    private static func withCoordinatedIndex<T>(
+        in baseURL: URL,
+        migrateLegacyRecords: Bool,
+        shouldCancel: @escaping () -> Bool,
+        operation: (UploadCompletionIndex) throws -> T
+    ) throws -> T {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+
+        let requestedDoneURL = baseURL.appendingPathComponent(
             ".done",
             isDirectory: true
         )
-        databaseURL = Self.indexURL(in: baseURL)
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var result: Result<T, Error>?
+
+        coordinator.coordinate(
+            writingItemAt: requestedDoneURL,
+            options: [],
+            error: &coordinationError
+        ) { coordinatedDoneURL in
+            result = Result {
+                try FileManager.default.createDirectory(
+                    at: coordinatedDoneURL,
+                    withIntermediateDirectories: true
+                )
+                let index = try UploadCompletionIndex(
+                    doneDirectoryURL: coordinatedDoneURL,
+                    migrateLegacyRecords: migrateLegacyRecords,
+                    shouldCancel: shouldCancel
+                )
+                defer { index.closeDatabase() }
+                return try operation(index)
+            }
+        }
+
+        if let coordinationError {
+            throw UploadCoreError.completionState(
+                "Coordinate upload history: "
+                    + coordinationError.localizedDescription
+            )
+        }
+        guard let result else {
+            throw UploadCoreError.completionState(
+                "Coordinate upload history: no coordinated URL was provided"
+            )
+        }
+        return try result.get()
+    }
+
+    private init(
+        doneDirectoryURL: URL,
+        migrateLegacyRecords: Bool,
+        shouldCancel: @escaping () -> Bool
+    ) throws {
+        self.doneDirectoryURL = doneDirectoryURL
+        self.shouldCancel = shouldCancel
+        databaseURL = doneDirectoryURL.appendingPathComponent(
+            Self.databaseFileName,
+            isDirectory: false
+        )
 
         do {
-            try FileManager.default.createDirectory(
-                at: doneDirectoryURL,
-                withIntermediateDirectories: true
-            )
+            try throwIfCancelled()
+            try verifyDatabaseIsLocallyAvailable()
             try openDatabase()
             try configureDatabase()
             try createSchema()
+            if FileManager.default.fileExists(atPath: resetMarkerURL.path) {
+                _ = try finishReset()
+            }
             if migrateLegacyRecords {
                 try migrateLegacyRecordsIfNeeded()
             }
@@ -72,6 +148,46 @@ final class UploadCompletionIndex {
         closeDatabase()
     }
 
+    private var resetMarkerURL: URL {
+        doneDirectoryURL.appendingPathComponent(
+            Self.resetMarkerFileName,
+            isDirectory: false
+        )
+    }
+
+    private func verifyDatabaseIsLocallyAvailable() throws {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return
+        }
+        let values: URLResourceValues
+        do {
+            values = try databaseURL.resourceValues(
+                forKeys: [
+                    .isRegularFileKey,
+                    .isUbiquitousItemKey,
+                    .ubiquitousItemDownloadingStatusKey,
+                ]
+            )
+        } catch {
+            throw UploadCoreError.completionState(
+                "Read \(databaseURL.lastPathComponent) availability: "
+                    + error.localizedDescription
+            )
+        }
+        guard values.isRegularFile == true else {
+            throw UploadCoreError.completionState(
+                "\(databaseURL.lastPathComponent) is not a regular file"
+            )
+        }
+        if values.isUbiquitousItem == true,
+           values.ubiquitousItemDownloadingStatus
+            != URLUbiquitousItemDownloadingStatus.current {
+            throw UploadCoreError.completionState(
+                "\(databaseURL.lastPathComponent) is not locally available"
+            )
+        }
+    }
+
     func records() throws -> [String: UploadDoneRecord] {
         let sql = """
             SELECT file_name, file_size, modified_at
@@ -82,6 +198,7 @@ final class UploadCompletionIndex {
 
         var records: [String: UploadDoneRecord] = [:]
         while true {
+            try throwIfCancelled()
             let result = sqlite3_step(statement)
             if result == SQLITE_DONE {
                 return records
@@ -198,6 +315,7 @@ final class UploadCompletionIndex {
 
         var legacyRecords: [String: UploadDoneRecord] = [:]
         for sidecar in sidecars {
+            try throwIfCancelled()
             let values: URLResourceValues
             do {
                 values = try sidecar.resourceValues(
@@ -320,16 +438,21 @@ final class UploadCompletionIndex {
     }
 
     private func reset() throws -> Int {
-        let legacySidecars = try legacySidecarURLs()
-        var removedDatabaseRecords = 0
-        try performTransaction {
-            try execute("DELETE FROM completed_uploads;")
-            guard let database else {
-                throw UploadCoreError.completionState("Database is not open")
-            }
-            removedDatabaseRecords = Int(sqlite3_changes(database))
+        do {
+            try Data().write(to: resetMarkerURL, options: .atomic)
+        } catch {
+            throw UploadCoreError.completionState(
+                "Begin upload-history reset: \(error.localizedDescription)"
+            )
         }
+        return try finishReset()
+    }
 
+    /// A durable marker makes an interrupted reset resume before legacy
+    /// records can be imported again. Database rows remain authoritative until
+    /// every legacy sidecar has been removed.
+    private func finishReset() throws -> Int {
+        let legacySidecars = try legacySidecarURLs()
         for sidecar in legacySidecars {
             do {
                 try FileManager.default.removeItem(at: sidecar)
@@ -340,6 +463,22 @@ final class UploadCompletionIndex {
                     underlying: error
                 )
             }
+        }
+
+        var removedDatabaseRecords = 0
+        try performTransaction {
+            try execute("DELETE FROM completed_uploads;")
+            guard let database else {
+                throw UploadCoreError.completionState("Database is not open")
+            }
+            removedDatabaseRecords = Int(sqlite3_changes(database))
+        }
+        do {
+            try FileManager.default.removeItem(at: resetMarkerURL)
+        } catch {
+            throw UploadCoreError.completionState(
+                "Finish upload-history reset: \(error.localizedDescription)"
+            )
         }
         return removedDatabaseRecords + legacySidecars.count
     }
@@ -435,5 +574,11 @@ final class UploadCompletionIndex {
             "\(operation) \(sidecar.lastPathComponent): "
                 + underlying.localizedDescription
         )
+    }
+
+    private func throwIfCancelled() throws {
+        if shouldCancel() {
+            throw UploadCoreError.cancelled
+        }
     }
 }
