@@ -243,6 +243,137 @@ final class RecordingWatchdog {
     }
 }
 
+final class RecordingInterruptionNotifier {
+    static let reconnectingIdentifier = "ContinuousRecording.Reconnecting"
+    static let attentionIdentifier = "ContinuousRecording.ConnectionAttention"
+    static let reconnectingDelay: TimeInterval = 10
+    static let attentionDelay: TimeInterval = 60
+
+    private let center = UNUserNotificationCenter.current()
+    private var activeSessionID: UUID?
+    private var generation = 0
+    private var notificationOperation: Task<Void, Never>?
+
+    func begin(sessionID: UUID, reason: String, elapsed: TimeInterval = 0) {
+        guard activeSessionID != sessionID else { return }
+        activeSessionID = sessionID
+        generation += 1
+        let scheduledGeneration = generation
+        let requests = Self.makeRequests(
+            sessionID: sessionID,
+            reason: reason,
+            elapsed: elapsed
+        )
+
+        enqueueNotificationOperation { notifier in
+            guard
+                notifier.activeSessionID == sessionID,
+                notifier.generation == scheduledGeneration
+            else {
+                return
+            }
+            for request in requests {
+                do {
+                    try await notifier.center.add(request)
+                } catch {
+                    CustomLogger.log(
+                        "[Continuous][Notification] Could not schedule "
+                            + "\(request.identifier): \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    func resolve(sessionID: UUID) {
+        guard activeSessionID == sessionID else { return }
+        activeSessionID = nil
+        generation += 1
+        enqueueNotificationOperation { notifier in
+            notifier.center.removePendingNotificationRequests(
+                withIdentifiers: Self.identifiers
+            )
+            notifier.center.removeDeliveredNotifications(
+                withIdentifiers: Self.identifiers
+            )
+        }
+    }
+
+    func cancelAll() {
+        activeSessionID = nil
+        generation += 1
+        enqueueNotificationOperation { notifier in
+            notifier.center.removePendingNotificationRequests(
+                withIdentifiers: Self.identifiers
+            )
+            notifier.center.removeDeliveredNotifications(
+                withIdentifiers: Self.identifiers
+            )
+        }
+    }
+
+    static func makeRequests(
+        sessionID: UUID,
+        reason: String,
+        elapsed: TimeInterval = 0
+    ) -> [UNNotificationRequest] {
+        let reconnectingContent = UNMutableNotificationContent()
+        reconnectingContent.title = "Recording reconnecting"
+        reconnectingContent.body =
+            "The recording is interrupted (\(reason)). The app is trying to recover it."
+        reconnectingContent.interruptionLevel = .active
+        reconnectingContent.userInfo = ["recordingSessionID": sessionID.uuidString]
+
+        let attentionContent = UNMutableNotificationContent()
+        attentionContent.title = "Recording needs attention"
+        attentionContent.body =
+            "The recording has not recovered. Open the app to check the Polar connection."
+        attentionContent.sound = .default
+        attentionContent.interruptionLevel = .timeSensitive
+        attentionContent.userInfo = ["recordingSessionID": sessionID.uuidString]
+
+        return [
+            UNNotificationRequest(
+                identifier: reconnectingIdentifier,
+                content: reconnectingContent,
+                trigger: trigger(delay: reconnectingDelay, elapsed: elapsed)
+            ),
+            UNNotificationRequest(
+                identifier: attentionIdentifier,
+                content: attentionContent,
+                trigger: trigger(delay: attentionDelay, elapsed: elapsed)
+            ),
+        ]
+    }
+
+    private static func trigger(
+        delay: TimeInterval,
+        elapsed: TimeInterval
+    ) -> UNNotificationTrigger? {
+        let remaining = delay - max(0, elapsed)
+        guard remaining > 0 else { return nil }
+        return UNTimeIntervalNotificationTrigger(
+            timeInterval: remaining,
+            repeats: false
+        )
+    }
+
+    private static var identifiers: [String] {
+        [reconnectingIdentifier, attentionIdentifier]
+    }
+
+    private func enqueueNotificationOperation(
+        _ operation: @escaping (RecordingInterruptionNotifier) async -> Void
+    ) {
+        let previous = notificationOperation
+        notificationOperation = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await operation(self)
+        }
+    }
+}
+
 final class CrashDiagnosticsReporter: NSObject, MXMetricManagerSubscriber {
     static let shared = CrashDiagnosticsReporter()
 

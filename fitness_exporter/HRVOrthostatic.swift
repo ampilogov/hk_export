@@ -131,7 +131,7 @@ class OrthostaticHRV: NSObject {
             SensorBagPersistence.importSavedBagToHealthKit(
                 fileURL: fileURL,
                 profile: .orthostatic,
-                deviceName: manager.peripheral?.name
+                deviceName: manager.deviceName
             ) { result in
                 switch result {
                 case .imported, .alreadyPresent:

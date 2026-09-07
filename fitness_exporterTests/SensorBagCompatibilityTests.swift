@@ -1,4 +1,5 @@
 import XCTest
+import UserNotifications
 @testable import fitness_exporter
 
 final class SensorBagCompatibilityTests: XCTestCase {
@@ -120,5 +121,96 @@ final class SensorBagCompatibilityTests: XCTestCase {
                 return
             }
         }
+    }
+
+    func test_connectionState_requiresEveryStreamAndRecoversAfterFailure() {
+        var state = BluetoothConnectionStateMachine()
+        state.requestConnection(requiredStreams: [.hr, .ecg, .acc])
+
+        XCTAssertTrue(state.handle(.connected(generation: 1)))
+        XCTAssertTrue(state.handle(.streamReady(.hr, generation: 1)))
+        XCTAssertTrue(state.handle(.streamReady(.ecg, generation: 1)))
+        XCTAssertFalse(state.isReady)
+
+        XCTAssertTrue(state.handle(.streamReady(.acc, generation: 1)))
+        XCTAssertTrue(state.isReady)
+
+        XCTAssertTrue(
+            state.handle(
+                .streamFailed(.ecg, generation: 1, message: "test failure")
+            )
+        )
+        XCTAssertEqual(state.phase, .degraded)
+        XCTAssertFalse(state.isReady)
+
+        XCTAssertTrue(state.handle(.streamReady(.ecg, generation: 1)))
+        XCTAssertTrue(state.isReady)
+    }
+
+    func test_connectionState_ignoresCallbacksFromObsoleteGeneration() {
+        var state = BluetoothConnectionStateMachine()
+        state.requestConnection(requiredStreams: [.hr, .ecg, .acc])
+        state.handle(.connected(generation: 1))
+        state.handle(.disconnected(generation: 1, pairingError: false))
+        state.handle(.connected(generation: 2))
+
+        XCTAssertFalse(state.handle(.streamReady(.hr, generation: 1)))
+        XCTAssertFalse(
+            state.handle(
+                .streamFailed(.acc, generation: 1, message: "late callback")
+            )
+        )
+        XCTAssertEqual(state.generation, 2)
+        XCTAssertTrue(state.readyStreams.isEmpty)
+
+        state.requestDisconnect()
+        XCTAssertFalse(state.handle(.connected(generation: 3)))
+        XCTAssertEqual(state.phase, .idle)
+        XCTAssertFalse(state.wantsConnection)
+    }
+
+    func test_interruptionNotifications_haveStableStagedEscalation() throws {
+        let sessionID = UUID()
+        let requests = RecordingInterruptionNotifier.makeRequests(
+            sessionID: sessionID,
+            reason: "Polar disconnected"
+        )
+
+        XCTAssertEqual(
+            requests.map(\.identifier),
+            [
+                RecordingInterruptionNotifier.reconnectingIdentifier,
+                RecordingInterruptionNotifier.attentionIdentifier,
+            ]
+        )
+        let reconnectingTrigger = try XCTUnwrap(
+            requests[0].trigger as? UNTimeIntervalNotificationTrigger
+        )
+        let attentionTrigger = try XCTUnwrap(
+            requests[1].trigger as? UNTimeIntervalNotificationTrigger
+        )
+        XCTAssertEqual(
+            reconnectingTrigger.timeInterval,
+            RecordingInterruptionNotifier.reconnectingDelay
+        )
+        XCTAssertEqual(
+            attentionTrigger.timeInterval,
+            RecordingInterruptionNotifier.attentionDelay
+        )
+        XCTAssertNil(requests[0].content.sound)
+        XCTAssertNotNil(requests[1].content.sound)
+        XCTAssertEqual(requests[0].content.interruptionLevel, .active)
+        XCTAssertEqual(requests[1].content.interruptionLevel, .timeSensitive)
+
+        let alreadyStale = RecordingInterruptionNotifier.makeRequests(
+            sessionID: sessionID,
+            reason: "ECG stale",
+            elapsed: 12
+        )
+        XCTAssertNil(alreadyStale[0].trigger)
+        let remainingAttentionTrigger = try XCTUnwrap(
+            alreadyStale[1].trigger as? UNTimeIntervalNotificationTrigger
+        )
+        XCTAssertEqual(remainingAttentionTrigger.timeInterval, 48)
     }
 }

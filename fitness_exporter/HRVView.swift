@@ -103,6 +103,12 @@ struct HRVView: View {
         case .done: return "Done"
         }
     }
+
+    private var deviceSummary: String {
+        "\(manager.deviceName ?? "") \(eventBridge.rawHR) "
+            + "(\(eventBridge.derivedHR) RR) bpm "
+            + "🔋\(manager.batteryLevel.map { "\($0)%" } ?? "--")"
+    }
     
     var body: some View {
         VStack(spacing: 16) {
@@ -161,7 +167,12 @@ struct HRVView: View {
                 }
             } else if connectionPhase == .connected {
                 VStack(spacing: 8) {
-                    Text("\(manager.peripheral?.name ?? manager.peripheral?.identifier.uuidString ?? "") \(eventBridge.rawHR) (\(eventBridge.derivedHR) RR) bpm 🔋\(manager.batteryLevel.map { "\($0)%" } ?? "--")")
+                    Text(deviceSummary)
+                    if !manager.isReadyForRecording {
+                        Text("Waiting for required sensor streams…")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     HStack {
                         Spacer()
                         Button("Start Recording") {
@@ -169,6 +180,7 @@ struct HRVView: View {
                             isProcessing = true
                             startRecording()
                         }
+                        .disabled(!manager.isReadyForRecording)
                         Button("Disconnect") {
                             manager.disconnect()
                             connectionPhase = .notConnected
@@ -178,7 +190,7 @@ struct HRVView: View {
                 }
             } else if connectionPhase == .recording {
                 VStack(spacing: 8) {
-                    Text("\(manager.peripheral?.name ?? manager.peripheral?.identifier.uuidString ?? "") \(eventBridge.rawHR) (\(eventBridge.derivedHR) RR) bpm 🔋\(manager.batteryLevel.map { "\($0)%" } ?? "--")")
+                    Text(deviceSummary)
                     HStack {
                         Spacer()
                         Button("Stop Recording") { showStopRecordingConfirm = true }
@@ -194,6 +206,15 @@ struct HRVView: View {
                         }
                     } else {
                         VStack {
+                            if let interruption = continuousRecorder.interruptionMessage {
+                                Text("Recovering: \(interruption)")
+                                    .font(.headline)
+                                    .foregroundColor(.orange)
+                            } else if !manager.isReadyForRecording {
+                                Text("Starting Polar sensor streams…")
+                                    .font(.headline)
+                                    .foregroundColor(.secondary)
+                            }
                             Text("RR: \(formatLast(continuousRecorder.lastRR))")
                             Text("ECG: \(formatLast(continuousRecorder.lastECG))")
                             Text("ACC: \(formatLast(continuousRecorder.lastACC))")
@@ -301,13 +322,18 @@ struct HRVView: View {
             // Ensure any persisted durations fall within our supported range so the steppers work
             validateDurations()
             UIApplication.shared.isIdleTimerDisabled = true
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            UNUserNotificationCenter.current().requestAuthorization(
+                options: [.alert, .sound, .badge]
+            ) { granted, error in
                 if let error = error {
                     CustomLogger.log("Notification authorization error: \(error)")
                 }
             }
             manager.disconnectPublisher
                 .sink { _ in
+                    if connectionPhase == .recording && selectedMode == .continuous {
+                        return
+                    }
                     connectionPhase = .notConnected
                     eventBridge.resetGraph()
                 }
@@ -368,7 +394,7 @@ struct HRVView: View {
         ) {
             Button("Stop Recording", role: .destructive) {
                 stopRecording()
-                connectionPhase = .connected
+                connectionPhase = manager.isConnected ? .connected : .notConnected
                 isProcessing = false
             }
             Button("Continue", role: .cancel) { }
@@ -546,7 +572,7 @@ struct HRVView: View {
         } else {
             continuousRecorder.stop()
             CustomLogger.log("Continuous recording stopped after \(formatElapsed(elapsedSeconds))")
-            connectionPhase = .connected
+            connectionPhase = manager.isConnected ? .connected : .notConnected
             isProcessing = false
             // After continuous session ends, auto-run incremental HK export and directory uploads
             kickOffIncrementalExport()

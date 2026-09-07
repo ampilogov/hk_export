@@ -58,6 +58,11 @@ final class ContinuousRecorder: ObservableObject {
         let deviceName: String?
     }
 
+    private struct ActiveInterruption {
+        let startedAt: Date
+        let reason: String
+    }
+
     private struct IngestionState {
         var recordingID: UUID?
         var lastRR: Date?
@@ -77,10 +82,12 @@ final class ContinuousRecorder: ObservableObject {
     private static let uiTimestampMinimumUpdateInterval: TimeInterval = 1
     private static let watchdogRefreshInterval: TimeInterval = 60
     private static let healthyStreamMaximumAge: TimeInterval = 15
+    private static let staleStreamMaximumAge: TimeInterval = 10
 
     private let manager: BluetoothManager
     private let recorder = SensorBagRecorder()
     private let watchdog = RecordingWatchdog()
+    private let interruptionNotifier = RecordingInterruptionNotifier()
     private let ingestionQueue = DispatchQueue(
         label: "com.fitness_exporter.continuousIngestion",
         qos: .utility
@@ -117,12 +124,15 @@ final class ContinuousRecorder: ObservableObject {
     private var pendingWriteCounts: [UUID: Int] = [:]
     private var retainedBatches: [PendingBatch] = []
     private var sessionsAwaitingFinalization = Set<UUID>()
+    private var activeInterruption: ActiveInterruption?
+    private var lastStreamRestartRequests: [SensorStreamKind: Date] = [:]
 
     /// Last reception timestamps for each sensor stream.
     @Published var lastRR: Date?
     @Published var lastECG: Date?
     @Published var lastACC: Date?
     @Published private(set) var attention: RecordingAttention?
+    @Published private(set) var interruptionMessage: String?
 
     init(manager: BluetoothManager) {
         self.manager = manager
@@ -174,6 +184,7 @@ final class ContinuousRecorder: ObservableObject {
         guard let recordingID = activeRecordingID else { return }
         manager.drainPendingSensorEvents()
         let finalSnapshot = drainIngestion(cancelScheduledPublish: true)
+        closeInterruptionForStop(at: Date())
         subscriptions.removeAll()
         if let finalSnapshot {
             applyIngestionSnapshot(finalSnapshot, requireRunning: false)
@@ -226,6 +237,10 @@ final class ContinuousRecorder: ObservableObject {
         lastWatchdogRR = nil
         lastWatchdogECG = nil
         lastWatchdogACC = nil
+        activeInterruption = nil
+        lastStreamRestartRequests.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.cancelAll()
         let recordingID = UUID()
         activeRecordingID = recordingID
         recorder.reset()
@@ -246,6 +261,10 @@ final class ContinuousRecorder: ObservableObject {
 
     private func endContinuousCapture() {
         subscriptions.removeAll()
+        interruptionNotifier.cancelAll()
+        activeInterruption = nil
+        lastStreamRestartRequests.removeAll()
+        interruptionMessage = nil
         endLiveActivity()
         activeRecordingID = nil
     }
@@ -258,19 +277,159 @@ final class ContinuousRecorder: ObservableObject {
     }
 
     private func checkStaleness() {
+        guard isRunning, let captureStart else { return }
         let now = Date()
-        if let last = lastRRReceivedAt, now.timeIntervalSince(last) > 10 {
-            notify(title: "RR data stale", body: "No RR data for 10s")
-            staleTimer?.invalidate()
+        guard now.timeIntervalSince(captureStart) >= Self.staleStreamMaximumAge else {
+            return
         }
-        if let last = lastECGReceivedAt, now.timeIntervalSince(last) > 10 {
-            notify(title: "ECG data stale", body: "No ECG data for 10s")
-            staleTimer?.invalidate()
+
+        let lastReceived: [(SensorStreamKind, Date?)] = [
+            (.hr, lastRRReceivedAt),
+            (.ecg, lastECGReceivedAt),
+            (.acc, lastACCReceivedAt),
+        ]
+        let stale = lastReceived.compactMap {
+            stream, lastSeen -> (stream: SensorStreamKind, age: TimeInterval)? in
+                let age = now.timeIntervalSince(lastSeen ?? captureStart)
+                return age > Self.staleStreamMaximumAge ? (stream, age) : nil
+            }
+        let staleStreams = Set(stale.map { $0.stream })
+
+        if staleStreams.isEmpty {
+            resolveInterruptionIfHealthy(at: now)
+        } else {
+            let names = staleStreams.map(\.rawValue).sorted().joined(separator: ", ")
+            beginInterruption(
+                reason: "no recent \(names) data",
+                restartStreams: staleStreams,
+                at: now,
+                notificationElapsed: stale.map { $0.age }.max() ?? 0
+            )
         }
-        if let last = lastACCReceivedAt, now.timeIntervalSince(last) > 10 {
-            notify(title: "ACC data stale", body: "No ACC data for 10s")
-            staleTimer?.invalidate()
+    }
+
+    private func handleLifecycleEvent(_ event: BluetoothLifecycleEvent) {
+        guard isRunning else { return }
+        let now = Date()
+        switch event {
+        case .disconnected(_, let pairingError):
+            beginInterruption(
+                reason: pairingError ? "Polar pairing error" : "Polar disconnected",
+                at: now
+            )
+        case .streamFailed(let stream, _, let message):
+            beginInterruption(
+                reason: "\(stream.rawValue.uppercased()) stream failed: \(message)",
+                at: now
+            )
+        case .connectionFailed(let message):
+            beginInterruption(
+                reason: "Polar connection failed: \(message)",
+                at: now
+            )
+        case .streamReady:
+            resolveInterruptionIfHealthy(at: now)
+        case .connecting, .connected:
+            break
         }
+    }
+
+    private func beginInterruption(
+        reason: String,
+        restartStreams: Set<SensorStreamKind> = [],
+        at date: Date,
+        notificationElapsed: TimeInterval = 0
+    ) {
+        guard let recordingID = activeRecordingID else { return }
+
+        for stream in restartStreams {
+            if let lastRequest = lastStreamRestartRequests[stream],
+                date.timeIntervalSince(lastRequest) < 30
+            {
+                continue
+            }
+            lastStreamRestartRequests[stream] = date
+            manager.restartStream(stream, reason: "No data received for 10 seconds")
+        }
+
+        guard activeInterruption == nil else { return }
+        let safeReason = reason.replacingOccurrences(of: "\n", with: " ")
+        interruptionMessage = safeReason
+        activeInterruption = ActiveInterruption(startedAt: date, reason: safeReason)
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_start reason=\(safeReason.prefix(160))",
+                at: date
+            )
+        }
+        if isWriteWindow {
+            flushCurrentBatch()
+        }
+        interruptionNotifier.begin(
+            sessionID: recordingID,
+            reason: safeReason,
+            elapsed: notificationElapsed
+        )
+        CustomLogger.log("[Continuous][Interrupted] \(safeReason)")
+    }
+
+    private func resolveInterruptionIfHealthy(at date: Date) {
+        guard
+            let recordingID = activeRecordingID,
+            let interruption = activeInterruption,
+            manager.isReadyForRecording,
+            let rr = lastRRReceivedAt,
+            let ecg = lastECGReceivedAt,
+            let acc = lastACCReceivedAt,
+            date.timeIntervalSince(rr) <= Self.healthyStreamMaximumAge,
+            date.timeIntervalSince(ecg) <= Self.healthyStreamMaximumAge,
+            date.timeIntervalSince(acc) <= Self.healthyStreamMaximumAge
+        else {
+            return
+        }
+
+        let durationMilliseconds = max(
+            0,
+            Int(date.timeIntervalSince(interruption.startedAt) * 1_000)
+        )
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_end duration_ms=\(durationMilliseconds)",
+                at: date
+            )
+        }
+        activeInterruption = nil
+        lastStreamRestartRequests.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.resolve(sessionID: recordingID)
+        CustomLogger.log(
+            "[Continuous][Recovered] All required streams healthy after "
+                + "\(durationMilliseconds)ms (\(interruption.reason))"
+        )
+    }
+
+    private func closeInterruptionForStop(at date: Date) {
+        guard
+            let recordingID = activeRecordingID,
+            let interruption = activeInterruption
+        else {
+            interruptionNotifier.cancelAll()
+            return
+        }
+        let durationMilliseconds = max(
+            0,
+            Int(date.timeIntervalSince(interruption.startedAt) * 1_000)
+        )
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_end duration_ms=\(durationMilliseconds) status=recording_stopped",
+                at: date
+            )
+        }
+        activeInterruption = nil
+        lastStreamRestartRequests.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.resolve(sessionID: recordingID)
     }
 
     private func subscribe(recordingID: UUID) {
@@ -282,10 +441,10 @@ final class ContinuousRecorder: ObservableObject {
             }
             .store(in: &subscriptions)
 
-        manager.disconnectPublisher
+        manager.lifecyclePublisher
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.notify(title: "Connection lost", body: "Peripheral disconnected")
+            .sink { [weak self] event in
+                self?.handleLifecycleEvent(event)
             }
             .store(in: &subscriptions)
     }
@@ -383,6 +542,7 @@ final class ContinuousRecorder: ObservableObject {
 
         if snapshot.lastRR != nil || snapshot.lastECG != nil || snapshot.lastACC != nil {
             let now = Date()
+            resolveInterruptionIfHealthy(at: now)
             refreshWatchdogIfHealthy(snapshot: snapshot, at: now)
             updateLiveActivityIfDue(at: now)
         }
@@ -478,7 +638,7 @@ final class ContinuousRecorder: ObservableObject {
             PendingBatch(
                 recordingID: recordingID,
                 bag: bag,
-                deviceName: manager.peripheral?.name
+                deviceName: manager.deviceName
             ))
     }
 
@@ -571,7 +731,7 @@ final class ContinuousRecorder: ObservableObject {
                 PendingBatch(
                     recordingID: recordingID,
                     bag: currentBag,
-                    deviceName: manager.peripheral?.name
+                    deviceName: manager.deviceName
                 ))
         }
         endContinuousCapture()
@@ -657,7 +817,7 @@ final class ContinuousRecorder: ObservableObject {
             CustomLogger.log("Live Activities are not enabled (capability or widget missing)")
             return
         }
-        let attributes = ContinuousRecordingAttributes(name: manager.peripheral?.name ?? "")
+        let attributes = ContinuousRecordingAttributes(name: manager.deviceName ?? "")
         let state = ContinuousRecordingAttributes.ContentState(lastRR: nil, lastECG: nil, lastACC: nil, elapsedSeconds: 0)
         do {
             activity = try Activity.request(

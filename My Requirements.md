@@ -32,7 +32,7 @@ Completed items are removed from this active tracker instead of accumulating und
 
 Find the causes of crashes or unexpected app termination during long recordings. Preserve as much recorded data as possible and make failures diagnosable after they occur.
 
-**Status:** In progress — silent termination after roughly 12 hours of continuous recording remains unresolved
+**Status:** In progress — observe normal use with retained lightweight diagnostics; no dedicated long-duration test is planned
 
 ### R3 — Make large recording collections and uploads efficient
 
@@ -44,13 +44,13 @@ The app must remain responsive with tens of thousands of existing recordings. Op
 
 Use the Polar SDK with one repeatable connection and stream lifecycle. Repeated Stop/Start, disconnect/reconnect, and unrelated upload activity must not leave HR/RR, ECG, or ACC partially stopped. When the Polar H10 disconnects unexpectedly, the app should reconnect automatically and resume every required stream without manual intervention. The resulting data should clearly represent any unavoidable gap.
 
-**Status:** Proposed
+**Status:** In progress — implementation complete; one real-device reconnect sanity check remains
 
 ### R5 — Make notifications actionable without causing noise
 
 Short, self-healing interruptions should not immediately notify the user. Persistent interruptions, exhausted reconnection attempts, recording failures, and unexpected app termination should reliably request attention.
 
-**Status:** Ready — implement an independent recording watchdog alongside the long-duration crash investigation
+**Status:** In progress — staged alerts are implemented; iPhone and paired-Watch delivery remain to be checked
 
 ### R6 — Add fast, interactive ECG access
 
@@ -78,9 +78,9 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 
 ## Recommended implementation order
 
-1. **R2 and R5 — Long-run stability and independent failure notification.** Diagnose the reported approximately 12-hour termination and add a low-frequency dead-man alert that survives the app process.
+1. **R4 and R5 — Reconnection, recording resume, and failure notification.** Build one connection-health state machine and use it for silent recovery followed by actionable escalation.
 2. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then compact local storage without changing server-visible files or payloads.
-3. **R4 — Reconnection and recording resume.** Build this around the same health state and escalation rules used by R5.
+3. **R2 — Passive stability observation.** Keep lightweight diagnostics available and investigate only if an unexpected termination recurs during normal use.
 4. **R6 — ECG inspection.** Build the viewer after the storage format supports efficient time-range reads.
 5. **R8 — Reset safety.** Protect destructive cursor and backfill reset controls before making the rest of the UI available during recording.
 6. **R9 — Recording-time UI usability.** Remove the global tab lock after recording state and conflicting actions are safely app-scoped.
@@ -90,10 +90,10 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
-| R2 | Crash prevention and diagnostics | In progress | Run a 12-hour device soak and classify any termination or stall from the retained evidence |
+| R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
 | R3 | File and upload efficiency | Proposed | Design one durable upload coordinator and background transfer queue |
-| R4 | Auto reconnect and resume | Proposed | Define and test the recording connection state machine |
-| R5 | Notification behavior | In progress | Add reconnect escalation and verify watchdog delivery on the iPhone and paired Apple Watch |
+| R4 | Auto reconnect and resume | In progress | Briefly interrupt one real H10 recording and confirm all three streams recover |
+| R5 | Notification behavior | In progress | Verify the 10-second and 60-second alerts on the iPhone and paired Apple Watch |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
 | R7 | Other inefficiencies | Proposed | Reassess after R2–R3 |
 | R8 | Reset-button safety | Proposed | Define confirmation, busy-state, and error-result behavior for both reset controls |
@@ -112,16 +112,17 @@ Current observations:
 
 Remaining approach:
 
-- Defer unfinished-window crash protection until the termination cause is understood. If evidence justifies it, prefer one active staging file rather than more frequent permanent file rotation.
-- Run a 12-hour physical-device soak first, followed by a 24-hour confirmation after fixing the identified cause. Classify the event as a crash, watchdog termination, Jetsam/memory termination, or recording stall before treating it as resolved.
-- Harden plotting against duplicate timestamps, empty data, and constant ranges.
+- Do not schedule dedicated 12-hour or 24-hour soak tests. Observe stability during normal recording use.
+- Keep the existing bounded session journal and MetricKit crash/application-exit payloads. Add no higher-frequency telemetry unless a recurring failure provides a specific question that requires it.
+- If termination recurs, classify it from the retained evidence before adding unfinished-window protection or more instrumentation.
+- Harden plotting against duplicate timestamps, empty data, and constant ranges when the graph path is next changed or if retained evidence implicates it.
 
 Acceptance criteria:
 
 - Previously completed files remain readable after force termination; only the unfinished current window remains at risk, bounded by the configured recording duration.
 - The binary bytes, final filename, and server-visible upload/export contract remain unchanged.
 - Any reduction in the crash-loss window must not materially increase battery drain or create an iCloud/file-synchronization storm.
-- A 12-hour reproduction or 24-hour confirmation run cannot silently stop without leaving both a durable diagnostic trail and a user-facing alert.
+- If a termination occurs during normal use, the next launch exposes the retained session marker and any available MetricKit evidence; the independently scheduled watchdog remains the immediate user-facing alert.
 - Graph edge cases are covered by automated tests before the graph path is expanded.
 
 ### R3 considerations — Files and uploads
@@ -170,32 +171,17 @@ Dependencies and decisions:
 
 ### R4 considerations — Auto reconnect and recording resume
 
-Current observations:
+Remaining verification:
 
-- There is no explicit reconnect loop after an unexpected disconnect.
-- The Polar SDK enables automatic reconnection by default, but the current disconnect callback explicitly disconnects the SDK session, likely cancelling that behavior.
-- CoreBluetooth and Polar SDK paths can both emit disconnect events and do not share one authoritative readiness state.
-- The UI can consider the device connected before RR, ECG, and ACC streams are actually ready.
-- The app first connects through its own `CBCentralManager`, then creates a separate Polar SDK API and asks the SDK to connect to the same identifier. This gives connection ownership to two independent Bluetooth stacks.
-- Polar stream-start flags are set before streaming succeeds and are not cleared when ECG, ACC, or HR emits an error or completion. That backend instance therefore cannot restart a failed stream.
-- The Polar disconnect callback calls the backend's explicit `disconnect()`, completing its event publishers and asking the SDK to disconnect even though SDK automatic reconnection is enabled by default.
-- Stop/Start of continuous recording only detaches and reattaches the recorder subscription; it does not verify that all three underlying SDK streams are still healthy.
-
-Proposed approach:
-
-- Introduce a state machine such as `idle → connecting → recording → degraded → reconnecting → recording/attentionNeeded`.
-- Track user intent separately from connection state. An unexpected disconnect must not clear the intent to keep recording; an explicit Stop must.
-- On loss, safely finalize the current segment, record a structured gap, and retry immediately with bounded exponential backoff.
-- Use one authoritative Polar connection path and deduplicate disconnect events.
-- Give each connection generation fresh, individually disposable stream subscriptions. Clear stream state on error, completion, and disconnect; ignore callbacks belonging to an obsolete generation.
-- Resume automatically only after all streams required by the selected profile have produced readiness or data signals.
-- Preserve enough session intent to recover after a system relaunch and adopt supported Bluetooth state preservation/restoration behavior.
+- During one continuous recording, interrupt the H10 connection briefly and confirm recording remains active and RR, ECG, and ACC all resume.
+- Confirm that stopping while recovery is in progress prevents recording from resuming, even if the SDK later reconnects the device.
+- Automatic recording recovery after an app-process termination is not part of this slice; the independent watchdog requests attention instead.
 
 Acceptance criteria:
 
 - A brief disconnect reconnects and resumes without user interaction.
 - Reconnection creates a new recoverable segment under the same logical session and records the gap duration.
-- Intentional Stop never triggers reconnection.
+- Intentional Stop never resumes or starts recording after a later connection recovery.
 - Duplicate callbacks cannot create duplicate sessions, alerts, or writers.
 - Repeating Stop/Start and disconnect/reconnect cycles cannot leave ECG or ACC absent while HR continues, and upload work cannot mutate Bluetooth stream state.
 - The UI reports `recording` only after RR, ECG, and ACC have each delivered data for the current connection generation.
@@ -203,22 +189,12 @@ Acceptance criteria:
 
 ### R5 considerations — Notifications
 
-Current observations:
-
-- A disconnect notification is sent immediately.
-- Stream-stale checks can send several notifications together and then invalidate their own timer, preventing continued monitoring.
-- The project has an iPhone app and Live Activity extension, but no watchOS app target. A separate watch app is therefore not available as an independent monitor today.
-- The local dead-man watchdog covers process death and all-stream stalls, but its delivery and false-positive behavior still require physical-device verification.
-
-Proposed behavior:
+Remaining verification:
 
 - **0–10 seconds:** reconnect silently; show status only in the app and Live Activity.
 - **At 10 seconds:** send one “Reconnecting” notification if the interruption is still active.
 - **At 60 seconds or after repeated failed attempts:** send one audible “Recording needs attention” notification.
-- Cancel pending disconnect notifications immediately after recovery and avoid a noisy “recovered” notification for very short gaps.
-- Monitor only streams enabled in the current recording profile and use stable notification identifiers for replacement and cancellation.
-- Verify normal notification delivery to the paired Apple Watch when the iPhone is locked or asleep before considering a dedicated watchOS target.
-- Consider a server-side missing-heartbeat alert later if immediate failure notification must work across app termination, phone failure, or loss of local execution.
+- Verify delivery to the paired Apple Watch with the iPhone locked before considering a dedicated watchOS target.
 
 Acceptance criteria:
 
@@ -226,7 +202,7 @@ Acceptance criteria:
 - A persistent interruption produces one notification at each configured escalation level, not one per stream or callback.
 - Recovery cancels all obsolete pending alerts.
 - A simulated dead process results in the pre-scheduled watchdog notification.
-- A healthy 12-hour run produces no false watchdog alert, while terminating the app after a checkpoint produces one alert within the documented grace period.
+- A healthy normal-use recording produces no false watchdog alert, while a deliberate notification sanity check produces one alert within the documented grace period.
 - Watch delivery is verified with the iPhone locked and the paired Apple Watch unlocked; failure to mirror must remain visible on the iPhone.
 
 Evidence references:
@@ -331,3 +307,4 @@ Record decisions here as requirements are refined.
 | 2026-09-06 | R5 | Decouple the configurable crash/data watchdog from five-minute file rotation | Notification latency may be shorter than the persistence interval, while file-write failures remain an immediate and separate error path |
 | 2026-09-06 | R8/R9 | Capture reset-button protection and recording-time tab navigation as separate work | These concerns should not be forgotten or silently expand the current crash slice |
 | 2026-09-06 | R4 | Treat repeatable Polar SDK stream lifecycle as a prerequisite for reconnect/resume | Current dual connection ownership, terminal publisher teardown, and sticky stream-start flags can explain HR continuing while ECG or ACC fails after repeated lifecycle operations |
+| 2026-09-06 | R2 | Use passive observation instead of dedicated long-duration soak testing | Existing bounded MetricKit and session-journal evidence is sufficient unless a failure recurs; manual effort should focus on notification sanity checks |
