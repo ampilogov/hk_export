@@ -454,6 +454,12 @@ final class ContinuousRecorder: ObservableObject {
         flushCurrentBatch()
         let off = max(0, intervalSeconds - durationSeconds)
         discardBufferedEventsAtNextWindowStart = off > 0
+        if off == 0 {
+            // Continuous mode has no off-window. Mark the new bag active in
+            // this same run-loop turn so Stop cannot skip its final contents.
+            startWriteWindow()
+            return
+        }
         sessionTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(off), repeats: false) { [weak self] _ in
             self?.startWriteWindow()
         }
@@ -658,7 +664,7 @@ final class ContinuousRecorder: ObservableObject {
                 attributes: attributes,
                 content: ActivityContent(
                     state: state,
-                    staleDate: Date().addingTimeInterval(watchdog.delay)
+                    staleDate: liveActivityStaleDate
                 )
             )
             // Observe state and re-request if user dismisses while running
@@ -703,6 +709,10 @@ final class ContinuousRecorder: ObservableObject {
         updateLiveActivity()
     }
 
+    private var liveActivityStaleDate: Date? {
+        (lastWatchdogRefreshAt ?? captureStart)?.addingTimeInterval(watchdog.delay)
+    }
+
     @available(iOS 16.1, *)
     private func updateLiveActivity() {
         if activity == nil { startLiveActivityIfNeeded() }
@@ -711,7 +721,7 @@ final class ContinuousRecorder: ObservableObject {
         let state = ContinuousRecordingAttributes.ContentState(lastRR: lastRR, lastECG: lastECG, lastACC: lastACC, elapsedSeconds: elapsed)
         let content = ActivityContent(
             state: state,
-            staleDate: Date().addingTimeInterval(watchdog.delay)
+            staleDate: liveActivityStaleDate
         )
         Task { await activity.update(content) }
     }

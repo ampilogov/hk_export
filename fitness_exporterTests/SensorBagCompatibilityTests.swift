@@ -107,4 +107,18 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(marker.sessionID, currentSessionID)
         XCTAssertNil(marker.lastSavedFileName)
     }
+
+    func test_fileListing_missingDirectoryReturnsExplicitError() {
+        let missingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        XCTAssertThrowsError(
+            try UploadHelper.listFiles(in: missingDirectory)
+        ) { error in
+            guard case UploadCoreError.directoryListFailed(_) = error else {
+                XCTFail("Unexpected error: \(error)")
+                return
+            }
+        }
+    }
 }

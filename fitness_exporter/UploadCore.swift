@@ -6,20 +6,23 @@ struct UploadDoneRecord: Codable {
     let lastModifiedAt: Date
 }
 
-enum UploadCoreError: Error, CustomStringConvertible {
+enum UploadCoreError: Error, CustomStringConvertible, LocalizedError {
     case invalidBookmark
-    case directoryListFailed
+    case directoryListFailed(String)
     case fileReadFailed(String)
     case network(String)
 
     var description: String {
         switch self {
         case .invalidBookmark: return "Invalid directory bookmark"
-        case .directoryListFailed: return "Failed to list directory"
+        case .directoryListFailed(let message):
+            return "Failed to list directory: \(message)"
         case .fileReadFailed(let name): return "Failed to read \(name)"
         case .network(let msg): return msg
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 private final class UploadQueueState {
@@ -35,14 +38,28 @@ enum UploadHelper {
         return try? URL(resolvingBookmarkData: bookmark, options: options, relativeTo: nil, bookmarkDataIsStale: &isStale)
     }
 
-    static func listFiles(in base: URL) -> [URL] {
+    static func listFiles(in base: URL) throws -> [URL] {
         let fm = FileManager.default
-        guard let contents = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey], options: [.skipsHiddenFiles]) else { return [] }
-        let filesOnly = (try? contents.filter { u in
-            let vals = try u.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
-            return (vals.isRegularFile ?? false) && u.lastPathComponent != ".DS_Store"
-        }) ?? []
-        return filesOnly.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        do {
+            let contents = try fm.contentsOfDirectory(
+                at: base,
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            let filesOnly = try contents.filter { url in
+                let values = try url.resourceValues(
+                    forKeys: [.isRegularFileKey, .isDirectoryKey])
+                return (values.isRegularFile ?? false)
+                    && url.lastPathComponent != ".DS_Store"
+            }
+            return filesOnly.sorted {
+                $0.lastPathComponent < $1.lastPathComponent
+            }
+        } catch {
+            throw UploadCoreError.directoryListFailed(
+                "\(base.lastPathComponent): \(error.localizedDescription)"
+            )
+        }
     }
 
     static func isLocallyAvailable(_ url: URL) -> Bool {
@@ -160,7 +177,13 @@ enum DirectoryUploader {
             completion(status)
         }
 
-        let files = UploadHelper.listFiles(in: baseURL)
+        let files: [URL]
+        do {
+            files = try UploadHelper.listFiles(in: baseURL)
+        } catch {
+            CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
+            return finish(error.localizedDescription)
+        }
         guard !files.isEmpty else { return finish(nil) }
         let doneMap = UploadHelper.loadDoneMap(for: baseURL)
         let pending = files.filter { file in

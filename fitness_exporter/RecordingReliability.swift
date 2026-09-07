@@ -129,7 +129,11 @@ final class RecordingWatchdog {
                 guard self.activeSessionID == sessionID else { return }
                 switch settings.authorizationStatus {
                 case .authorized, .provisional, .ephemeral:
-                    break
+                    if settings.timeSensitiveSetting != .enabled {
+                        warning(
+                            "Recording alerts are allowed, but Time Sensitive alerts are disabled. Focus may delay a recording warning."
+                        )
+                    }
                 default:
                     warning(
                         "Recording alerts are disabled. Enable notifications in Settings so the app can warn you if recording stops."
@@ -188,11 +192,6 @@ final class RecordingWatchdog {
                 return
             }
 
-            watchdog.center.removePendingNotificationRequests(
-                withIdentifiers: [Self.notificationIdentifier])
-            watchdog.center.removeDeliveredNotifications(
-                withIdentifiers: [Self.notificationIdentifier])
-
             let content = UNMutableNotificationContent()
             content.title = "Recording needs attention"
             content.body =
@@ -213,19 +212,21 @@ final class RecordingWatchdog {
 
             do {
                 try await watchdog.center.add(request)
+                guard
+                    watchdog.activeSessionID == sessionID,
+                    watchdog.generation == scheduledGeneration
+                else {
+                    // A queued refresh or stop operation will replace or
+                    // cancel this request. Keep it in place until then so a
+                    // process exit cannot create a no-watchdog interval.
+                    return
+                }
+                watchdog.center.removeDeliveredNotifications(
+                    withIdentifiers: [Self.notificationIdentifier])
             } catch {
                 CustomLogger.log(
                     "[Continuous][Watchdog] Could not schedule alert: \(error.localizedDescription)"
                 )
-            }
-
-            if watchdog.activeSessionID != sessionID
-                || watchdog.generation != scheduledGeneration
-            {
-                watchdog.center.removePendingNotificationRequests(
-                    withIdentifiers: [Self.notificationIdentifier])
-                watchdog.center.removeDeliveredNotifications(
-                    withIdentifiers: [Self.notificationIdentifier])
             }
         }
     }
@@ -260,19 +261,39 @@ final class CrashDiagnosticsReporter: NSObject, MXMetricManagerSubscriber {
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         queue.async { [weak self] in
-            self?.persist(payloads)
+            self?.persistDiagnostics(payloads)
         }
     }
 
-    private func persist(_ payloads: [MXDiagnosticPayload]) {
+    func didReceive(_ payloads: [MXMetricPayload]) {
+        queue.async { [weak self] in
+            self?.persistExitMetrics(payloads)
+        }
+    }
+
+    private func persistDiagnostics(_ payloads: [MXDiagnosticPayload]) {
+        persistJSON(
+            payloads.map { (prefix: "metric-diagnostic", data: $0.jsonRepresentation()) }
+        )
+    }
+
+    private func persistExitMetrics(_ payloads: [MXMetricPayload]) {
+        let exitPayloads = payloads.compactMap { payload -> (prefix: String, data: Data)? in
+            guard payload.applicationExitMetrics != nil else { return nil }
+            return (prefix: "metric-exit", data: payload.jsonRepresentation())
+        }
+        persistJSON(exitPayloads)
+    }
+
+    private func persistJSON(_ payloads: [(prefix: String, data: Data)]) {
         guard !payloads.isEmpty else { return }
         do {
             let directory = try diagnosticsDirectory()
             for payload in payloads {
                 let milliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
                 let fileURL = directory.appendingPathComponent(
-                    "metric-diagnostic-\(milliseconds)-\(UUID().uuidString).json")
-                try payload.jsonRepresentation().write(to: fileURL, options: .atomic)
+                    "\(payload.prefix)-\(milliseconds)-\(UUID().uuidString).json")
+                try payload.data.write(to: fileURL, options: .atomic)
                 CustomLogger.log(
                     "[Diagnostics] Saved MetricKit report \(fileURL.lastPathComponent)"
                 )

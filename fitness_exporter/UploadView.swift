@@ -151,7 +151,16 @@ private struct UploadDirectorySection: View {
 
     private func refreshFileList() {
         guard let url = resolvedURL else { return }
-        self.files = UploadHelper.listFiles(in: url)
+        do {
+            self.files = try UploadHelper.listFiles(in: url)
+            self.errorText = nil
+        } catch {
+            self.files = []
+            self.isLoadingDoneMap = false
+            self.errorText = error.localizedDescription
+            CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
+            return
+        }
         self.isLoadingDoneMap = true
         DispatchQueue.global(qos: .userInitiated).async {
             let map = UploadHelper.loadDoneMap(for: url)

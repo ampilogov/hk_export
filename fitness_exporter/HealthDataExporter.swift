@@ -388,6 +388,17 @@ class HealthDataExporter {
 
             timeSinceSeriesStartArr.append(timeSinceSeriesStart)
             precededByGapArr.append(precededByGap)
+            guard timeSinceSeriesStartArr.count <= heartbeatSeries.count else {
+                finished = true
+                healthStore.stop(query)
+                return completion(
+                    ExtractionError.heartbeatSeriesState(
+                        expected: heartbeatSeries.count,
+                        actual: timeSinceSeriesStartArr.count,
+                        done: done
+                    ).localizedDescription
+                )
+            }
             let expectedDone = timeSinceSeriesStartArr.count == heartbeatSeries.count
             guard done == expectedDone else {
                 finished = true
@@ -442,6 +453,17 @@ class HealthDataExporter {
 
             locations.append(contentsOf: locationsPart)
 
+            guard locations.count <= workoutRoute.count else {
+                finished = true
+                healthStore.stop(query)
+                return completion(
+                    ExtractionError.workoutRouteState(
+                        expected: workoutRoute.count,
+                        actual: locations.count,
+                        done: done
+                    ).localizedDescription
+                )
+            }
             let expectedDone = locations.count == workoutRoute.count
             guard done == expectedDone else {
                 finished = true
