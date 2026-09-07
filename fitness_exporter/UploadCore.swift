@@ -22,6 +22,11 @@ enum UploadCoreError: Error, CustomStringConvertible {
     }
 }
 
+private final class UploadQueueState {
+    var nextIndex = 0
+    var firstError: String?
+}
+
 enum UploadHelper {
     static func resolveURL(from bookmark: Data) -> URL? {
         var isStale = false
@@ -104,7 +109,7 @@ enum UploadHelper {
             let rec = UploadDoneRecord(fileName: file.lastPathComponent, fileSize: size, lastModifiedAt: mtime)
             let data = try JSONEncoder().encode(rec)
             let out = doneDir.appendingPathComponent("\(file.lastPathComponent).json")
-            try data.write(to: out)
+            try data.write(to: out, options: .atomic)
             return rec
         } catch {
             CustomLogger.log("[UploadCore] Failed to write .done: \(error.localizedDescription)")
@@ -139,51 +144,139 @@ enum DirectoryUploader {
             return completion(UploadCoreError.invalidBookmark.description)
         }
         let hasAccess = baseURL.startAccessingSecurityScopedResource()
-        defer { if hasAccess { baseURL.stopAccessingSecurityScopedResource() } }
+        let completionLock = NSLock()
+        var didFinish = false
+        func finish(_ status: String?) {
+            completionLock.lock()
+            guard !didFinish else {
+                completionLock.unlock()
+                return
+            }
+            didFinish = true
+            completionLock.unlock()
+            if hasAccess {
+                baseURL.stopAccessingSecurityScopedResource()
+            }
+            completion(status)
+        }
 
         let files = UploadHelper.listFiles(in: baseURL)
-        guard !files.isEmpty else { return completion(nil) }
+        guard !files.isEmpty else { return finish(nil) }
         let doneMap = UploadHelper.loadDoneMap(for: baseURL)
         let pending = files.filter { file in
             guard let rec = doneMap[file.lastPathComponent] else { return true }
             return !UploadHelper.recordMatchesFile(rec, fileURL: file)
         }
-        guard !pending.isEmpty else { return completion(nil) }
+        guard !pending.isEmpty else { return finish(nil) }
 
         let session = ServerSession.getSession(server: server)
-        self.uploadQueue(pending, index: 0, dirName: dir.name, base: baseURL, session: session, sender: sender, stopOnError: stopOnError, completion: completion)
+        self.uploadQueue(
+            pending,
+            dirName: dir.name,
+            base: baseURL,
+            session: session,
+            sender: sender,
+            stopOnError: stopOnError,
+            completion: finish
+        )
     }
 
-    private static func uploadQueue(_ files: [URL], index: Int, dirName: String, base: URL, session: ServerSession, sender: String, stopOnError: Bool, completion: @escaping (String?) -> Void) {
-        guard index < files.count else { return completion(nil) }
-        let file = files[index]
-        // In background (stopOnError == false), skip files that are not locally available to avoid
-        // iCloud hydration while the device may be locked. Log the skip.
-        if !stopOnError && !UploadHelper.isLocallyAvailable(file) {
-            CustomLogger.log("[Upload][Skip] dir=\(dirName) file=\(file.lastPathComponent) reason=iCloud file not locally available")
-            return self.uploadQueue(files, index: index + 1, dirName: dirName, base: base, session: session, sender: sender, stopOnError: stopOnError, completion: completion)
+    private static func uploadQueue(
+        _ files: [URL],
+        dirName: String,
+        base: URL,
+        session: ServerSession,
+        sender: String,
+        stopOnError: Bool,
+        completion: @escaping (String?) -> Void
+    ) {
+        let state = UploadQueueState()
+
+        func processNext() {
+            while state.nextIndex < files.count {
+                let file = files[state.nextIndex]
+                state.nextIndex += 1
+
+                // In background, do not hydrate iCloud files while the device
+                // may be locked. Continue iteratively so a large backlog
+                // cannot overflow the call stack.
+                if !stopOnError && !UploadHelper.isLocallyAvailable(file) {
+                    let message =
+                        "Deferred \(file.lastPathComponent): iCloud file is not locally available"
+                    state.firstError = state.firstError ?? message
+                    CustomLogger.log(
+                        "[Upload][Skip] dir=\(dirName) file=\(file.lastPathComponent) reason=iCloud file not locally available"
+                    )
+                    continue
+                }
+
+                guard let data = try? Data(contentsOf: file) else {
+                    let message = UploadCoreError.fileReadFailed(
+                        file.lastPathComponent).description
+                    CustomLogger.log(
+                        "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(message)"
+                    )
+                    if stopOnError {
+                        completion(message)
+                        return
+                    }
+                    state.firstError = state.firstError ?? message
+                    continue
+                }
+
+                let size = data.count
+                CustomLogger.log(
+                    "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
+                )
+                session.uploadFile(
+                    dirName: dirName,
+                    fileName: file.lastPathComponent,
+                    fileBytes: data,
+                    fullPath: file.path,
+                    sender: sender
+                ) { error in
+                    if let error {
+                        CustomLogger.log(
+                            "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(error)"
+                        )
+                        if stopOnError {
+                            completion(error)
+                            return
+                        }
+                        state.firstError = state.firstError ?? error
+                        DispatchQueue.global(qos: .utility).async {
+                            processNext()
+                        }
+                        return
+                    }
+
+                    CustomLogger.log(
+                        "[Upload][Success] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
+                    )
+                    guard UploadHelper.markDone(file: file, base: base) != nil else {
+                        let message =
+                            "Upload succeeded but completion state could not be saved for \(file.lastPathComponent)"
+                        if stopOnError {
+                            completion(message)
+                            return
+                        }
+                        state.firstError = state.firstError ?? message
+                        DispatchQueue.global(qos: .utility).async {
+                            processNext()
+                        }
+                        return
+                    }
+                    DispatchQueue.global(qos: .utility).async {
+                        processNext()
+                    }
+                }
+                return
+            }
+
+            completion(state.firstError)
         }
 
-        guard let data = try? Data(contentsOf: file) else {
-            let msg = UploadCoreError.fileReadFailed(file.lastPathComponent).description
-            CustomLogger.log("[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(msg)")
-            if stopOnError { return completion(msg) }
-            // Background: continue with remaining files
-            return self.uploadQueue(files, index: index + 1, dirName: dirName, base: base, session: session, sender: sender, stopOnError: stopOnError, completion: completion)
-        }
-        let size = data.count
-        CustomLogger.log("[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)")
-        session.uploadFile(dirName: dirName, fileName: file.lastPathComponent, fileBytes: data, fullPath: file.path, sender: sender) { err in
-            if let err = err {
-                CustomLogger.log("[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(err)")
-                if stopOnError { return completion(err) }
-                // If not stopping on error, proceed to next
-                return self.uploadQueue(files, index: index + 1, dirName: dirName, base: base, session: session, sender: sender, stopOnError: stopOnError, completion: completion)
-            }
-            CustomLogger.log("[Upload][Success] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)")
-            UploadHelper.markDone(file: file, base: base)
-            self.uploadQueue(files, index: index + 1, dirName: dirName, base: base, session: session, sender: sender, stopOnError: stopOnError, completion: completion)
-        }
+        processNext()
     }
 }
 
@@ -257,18 +350,29 @@ final class UploadDirectoriesStore: ObservableObject {
 
 extension DirectoryUploader {
     static func uploadAllDirectories(_ dirs: [UploadDirectory], server: String, sender: String, stopOnError: Bool = true, completion: @escaping (String?) -> Void) {
-        func loop(_ idx: Int) {
-            if idx >= dirs.count { return completion(nil) }
-            uploadAll(dir: dirs[idx], server: server, sender: sender, stopOnError: stopOnError) { err in
-                if let err = err { return completion(err) }
-                loop(idx + 1)
+        let state = UploadQueueState()
+        func loop(_ index: Int) {
+            if index >= dirs.count { return completion(state.firstError) }
+            uploadAll(
+                dir: dirs[index],
+                server: server,
+                sender: sender,
+                stopOnError: stopOnError
+            ) { error in
+                if let error {
+                    if stopOnError { return completion(error) }
+                    state.firstError = state.firstError ?? error
+                }
+                loop(index + 1)
             }
         }
         loop(0)
     }
 
     static func uploadAllFromStore(stopOnError: Bool = true, completion: @escaping (String?) -> Void) {
-        guard let cfg = getServerAndSender() else { return completion(nil) }
+        guard let cfg = getServerAndSender() else {
+            return completion("Upload server or sender is not configured")
+        }
         let store = UploadDirectoriesStore()
         let dirs = store.dirs
         guard !dirs.isEmpty else { return completion(nil) }

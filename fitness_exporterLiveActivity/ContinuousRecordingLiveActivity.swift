@@ -10,6 +10,11 @@ struct ContinuousRecordingLiveActivity: Widget {
             VStack(alignment: .leading, spacing: 4) {
                 Text(context.attributes.name.isEmpty ? "HR Sensor" : context.attributes.name)
                     .font(.headline)
+                if context.isStale {
+                    Label("Recording status stale", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
                 HStack(spacing: 12) {
                     Label(Self.fmt(context.state.lastRR), systemImage: "waveform.path.ecg")
                     Label(Self.fmt(context.state.lastECG), systemImage: "bolt.heart")
@@ -32,15 +37,29 @@ struct ContinuousRecordingLiveActivity: Widget {
                     Label(Self.fmt(context.state.lastACC), systemImage: "figure.run")
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Label("Updated \(Self.maxStaleness(context.state))", systemImage: "clock")
+                    Label(
+                        context.isStale
+                            ? "Recording status stale"
+                            : "Updated \(Self.maxStaleness(context.state))",
+                        systemImage: context.isStale
+                            ? "exclamationmark.triangle.fill"
+                            : "clock"
+                    )
                         .font(.caption2)
+                        .foregroundStyle(context.isStale ? .red : .primary)
                 }
             } compactLeading: {
                 Image(systemName: "waveform.path.ecg")
             } compactTrailing: {
-                Text(Self.maxStalenessShort(context.state))
+                Text(context.isStale ? "!" : Self.maxStalenessShort(context.state))
+                    .foregroundStyle(context.isStale ? .red : .primary)
             } minimal: {
-                Image(systemName: "figure.run")
+                Image(
+                    systemName: context.isStale
+                        ? "exclamationmark.triangle.fill"
+                        : "figure.run"
+                )
+                .foregroundStyle(context.isStale ? .red : .primary)
             }
         }
     }

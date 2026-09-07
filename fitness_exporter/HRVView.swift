@@ -353,6 +353,14 @@ struct HRVView: View {
         .onChange(of: scenePhase) {
             updateEventPresentationState()
         }
+        .onReceive(continuousRecorder.$attention.compactMap { $0 }) { attention in
+            guard attention.endedRecording else { return }
+            timer?.invalidate()
+            timer = nil
+            startDate = nil
+            connectionPhase = manager.isConnected ? .connected : .notConnected
+            isProcessing = false
+        }
         .confirmationDialog(
             "Stop recording?",
             isPresented: $showStopRecordingConfirm,
@@ -371,6 +379,32 @@ struct HRVView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Please make sure your volume is turned up so you can hear the stand-up alert.")
+        }
+        .alert(
+            item: Binding(
+                get: { continuousRecorder.attention },
+                set: { value in
+                    if value == nil {
+                        continuousRecorder.dismissAttention()
+                    }
+                }
+            )
+        ) { attention in
+            if attention.offersWriteRetry {
+                return Alert(
+                    title: Text(attention.title),
+                    message: Text(attention.message),
+                    primaryButton: .default(Text("Retry Save")) {
+                        continuousRecorder.retryFailedWrites()
+                    },
+                    secondaryButton: .cancel(Text("Keep for Later"))
+                )
+            }
+            return Alert(
+                title: Text(attention.title),
+                message: Text(attention.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
         .sheet(isPresented: $showCustomEventSheet) {
             VStack(spacing: 16) {

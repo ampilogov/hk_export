@@ -12,6 +12,8 @@ enum UserDefaultsKeys {
     static let HRV_WARMUP_DURATION = "hrvWarmupDuration"
     static let HRV_RECORDING_DURATION = "hrvRecordingDuration"
     static let HRV_RECORDING_INTERVAL = "hrvRecordingInterval"
+    static let RECORDING_WATCHDOG_DELAY_SECONDS = "recordingWatchdogDelaySeconds"
+    static let ACTIVE_CONTINUOUS_RECORDING = "activeContinuousRecording"
 }
 
 enum HRVConstants {

@@ -8,6 +8,8 @@ struct SettingsView: View {
     @AppStorage(UserDefaultsKeys.AUTO_SERVER_DISCOVERY_ENABLED) private
         var autoServerDiscovery: Bool =
             false
+    @AppStorage(UserDefaultsKeys.RECORDING_WATCHDOG_DELAY_SECONDS) private
+        var recordingWatchdogDelaySeconds: Int = 180
     @State private var bgRefreshCursorsText: String = ""
     @State private var hkBackfillStatusText: String = ""
     @State private var isHKBackfillRunning: Bool = false
@@ -23,6 +25,23 @@ struct SettingsView: View {
                 TextField("Sender", text: $sender)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .padding()
+            }
+
+            Section(header: Text("Continuous recording safety")) {
+                Picker(
+                    "Alert if recording stops",
+                    selection: $recordingWatchdogDelaySeconds
+                ) {
+                    Text("2 minutes").tag(120)
+                    Text("3 minutes").tag(180)
+                    Text("5 minutes").tag(300)
+                    Text("8 minutes").tag(480)
+                }
+                Text(
+                    "This alert is independent of the five-minute recording file interval."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
             }
 
             Section(header: Text("Background refresh")) {

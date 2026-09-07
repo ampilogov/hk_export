@@ -5,8 +5,30 @@ import HealthKit
 import Security
 import zlib
 
-enum ExtractionError: Error {
+enum ExtractionError: LocalizedError {
     case unitParseError(String)
+    case quantitySeriesQueryFailed(String)
+    case quantitySeriesCountMismatch(expected: Int, actual: Int)
+    case heartbeatSeriesState(expected: Int, actual: Int, done: Bool)
+    case workoutRouteMissingLocations
+    case workoutRouteState(expected: Int, actual: Int, done: Bool)
+
+    var errorDescription: String? {
+        switch self {
+        case .unitParseError(let message):
+            return message
+        case .quantitySeriesQueryFailed(let message):
+            return "Quantity series query failed: \(message)"
+        case .quantitySeriesCountMismatch(let expected, let actual):
+            return "Quantity series count mismatch: expected \(expected), received \(actual)"
+        case .heartbeatSeriesState(let expected, let actual, let done):
+            return "Heartbeat series state mismatch: expected \(expected), received \(actual), done=\(done)"
+        case .workoutRouteMissingLocations:
+            return "Workout route query returned no locations without an error"
+        case .workoutRouteState(let expected, let actual, let done):
+            return "Workout route state mismatch: expected \(expected), received \(actual), done=\(done)"
+        }
+    }
 }
 
 class Payload {
@@ -130,7 +152,7 @@ class HealthDataExporter {
             }
 
             if let quanititySample = sample as? HKQuantitySample {
-                let series = extractSeries(
+                let series = try extractSeries(
                     quanititySample: quanititySample, healthStore: healthStore)
                 return self.sendPayload(
                     data: try self.encodeQuantitySample(
@@ -285,7 +307,7 @@ class HealthDataExporter {
 
     private func extractSeries(
         quanititySample: HKQuantitySample, healthStore: HKHealthStore
-    ) -> [(DateInterval, HKQuantity)] {
+    ) throws -> [(DateInterval, HKQuantity)] {
         if quanititySample.count > 1 {
             let objectPredicate = HKQuery.predicateForObject(
                 with: quanititySample.uuid)
@@ -297,25 +319,37 @@ class HealthDataExporter {
                     predicate: predicate,
                     options: .orderByQuantitySampleStartDate)
             let asyncSeries = seriesDescriptor.results(for: healthStore)
-            var series: [(DateInterval, HKQuantity)] = []
+            var result: Result<[(DateInterval, HKQuantity)], Error>?
             let semaphore = DispatchSemaphore(value: 0)
             Task {
-                for try await entry in asyncSeries {
-                    series.append((entry.dateInterval, entry.quantity))
+                defer { semaphore.signal() }
+                do {
+                    var series: [(DateInterval, HKQuantity)] = []
+                    for try await entry in asyncSeries {
+                        series.append((entry.dateInterval, entry.quantity))
+                    }
+                    result = .success(series)
+                } catch {
+                    result = .failure(error)
                 }
-                semaphore.signal()
             }
             semaphore.wait()
-            if series.count == 1 {
-                assert(quanititySample.count == 1)
-                let dateInterval = series[0].0
-                let value = series[0].1
-                assert(dateInterval.start == quanititySample.startDate)
-                assert(
-                    dateInterval.start + dateInterval.duration
-                        == quanititySample.endDate)
-                assert(value == quanititySample.quantity)
-                // print("\(Date()) -- ok")
+            guard let result else {
+                throw ExtractionError.quantitySeriesQueryFailed(
+                    "Query completed without a result")
+            }
+            let series: [(DateInterval, HKQuantity)]
+            do {
+                series = try result.get()
+            } catch {
+                throw ExtractionError.quantitySeriesQueryFailed(
+                    error.localizedDescription)
+            }
+            guard series.count == quanititySample.count else {
+                throw ExtractionError.quantitySeriesCountMismatch(
+                    expected: quanititySample.count,
+                    actual: series.count
+                )
             }
             return series
         } else {
@@ -337,27 +371,38 @@ class HealthDataExporter {
     ) {
         var timeSinceSeriesStartArr: [Double] = []
         var precededByGapArr: [Bool] = []
+        var finished = false
 
         let heartbeatSeriesQuery = HKHeartbeatSeriesQuery(
             heartbeatSeries: heartbeatSeries
         ) {
             (query, timeSinceSeriesStart, precededByGap, done, error) in
+            guard !finished else { return }
             guard error == nil else {
+                finished = true
                 return completion(
-                    "Failed to run query: \(error?.localizedDescription ?? "WTF")"
+                    "Failed to export heartbeat series \(heartbeatSeries.uuid): "
+                        + (error?.localizedDescription ?? "Unknown query error")
                 )
             }
 
             timeSinceSeriesStartArr.append(timeSinceSeriesStart)
             precededByGapArr.append(precededByGap)
-            if done != (timeSinceSeriesStartArr.count == heartbeatSeries.count)
-            {
-                fatalError(
-                    "HR RR query issue: \(done) \(timeSinceSeriesStartArr.count)/\(heartbeatSeries.count)"
+            let expectedDone = timeSinceSeriesStartArr.count == heartbeatSeries.count
+            guard done == expectedDone else {
+                finished = true
+                healthStore.stop(query)
+                return completion(
+                    ExtractionError.heartbeatSeriesState(
+                        expected: heartbeatSeries.count,
+                        actual: timeSinceSeriesStartArr.count,
+                        done: done
+                    ).localizedDescription
                 )
             }
 
-            if timeSinceSeriesStartArr.count == heartbeatSeries.count {
+            if expectedDone {
+                finished = true
                 let cSeriesSample = self.encodeHeartbeatSeriesSample(
                     heartbeatSeriesSample: heartbeatSeries,
                     timeSinceSeriesStart: timeSinceSeriesStartArr,
@@ -365,8 +410,6 @@ class HealthDataExporter {
                 self.sendPayload(
                     data: cSeriesSample, type: "heartbeat_series",
                     completion: completion)
-            } else if timeSinceSeriesStartArr.count > heartbeatSeries.count {
-                fatalError("Too many samples in a HR series")
             }
         }
         healthStore.execute(heartbeatSeriesQuery)
@@ -377,36 +420,47 @@ class HealthDataExporter {
         completion: @escaping (String?) -> Void
     ) {
         var locations: [CLLocation] = []
+        var finished = false
 
         let workoutRouteQuery = HKWorkoutRouteQuery(route: workoutRoute) {
             (query, locationsOrNil, done, error) in
+            guard !finished else { return }
             guard error == nil else {
+                finished = true
                 return completion(
-                    "Failed to run query: \(error?.localizedDescription ?? "WTF")"
+                    "Failed to export workout route \(workoutRoute.uuid): "
+                        + (error?.localizedDescription ?? "Unknown query error")
                 )
             }
 
             guard let locationsPart = locationsOrNil else {
-                fatalError(
-                    "*** Invalid State: This can only fail if there was an error. ***"
-                )
+                finished = true
+                healthStore.stop(query)
+                return completion(
+                    ExtractionError.workoutRouteMissingLocations.localizedDescription)
             }
 
             locations.append(contentsOf: locationsPart)
 
-            if done != (locations.count == workoutRoute.count) {
-                fatalError(
-                    "Workout route query issue: \(done) \(locations.count)/\(workoutRoute.count)"
+            let expectedDone = locations.count == workoutRoute.count
+            guard done == expectedDone else {
+                finished = true
+                healthStore.stop(query)
+                return completion(
+                    ExtractionError.workoutRouteState(
+                        expected: workoutRoute.count,
+                        actual: locations.count,
+                        done: done
+                    ).localizedDescription
                 )
             }
-            if locations.count == workoutRoute.count {
+            if expectedDone {
+                finished = true
                 self.sendPayload(
                     data: self.encodeWorkoutRoute(
                         route: workoutRoute, locations: locations),
                     type: "workout_route",
                     completion: completion)
-            } else if locations.count > workoutRoute.count {
-                fatalError("Too many samples in workout route")
             }
         }
         healthStore.execute(workoutRouteQuery)
@@ -828,7 +882,12 @@ class HealthDataExporter {
         throws
         -> CQuantitySample
     {
-        assert(quantitySample.count == series.count)
+        guard quantitySample.count == series.count else {
+            throw ExtractionError.quantitySeriesCountMismatch(
+                expected: quantitySample.count,
+                actual: series.count
+            )
+        }
         return CQuantitySample(
             superSample: encodeSample(sample: quantitySample),
             quantity: try encodeQuantity(quantity: quantitySample.quantity),
@@ -1184,6 +1243,13 @@ class HealthKitManager {
         _ sampleType: HKSampleType,
         completion: @escaping () -> Void
     ) {
+        guard !RecordingSessionJournal.hasActiveSession else {
+            CustomLogger.log(
+                "[HKObserver] Continuous recording is active; deferring HealthKit read for \(sampleType)"
+            )
+            completion()
+            return
+        }
         CustomLogger.log("[HKObserver][Info] \(sampleType) started processing")
 
         let exporter = IncrementalExporter()

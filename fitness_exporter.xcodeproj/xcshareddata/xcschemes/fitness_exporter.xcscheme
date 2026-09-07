@@ -21,6 +21,20 @@
                ReferencedContainer = "container:fitness_exporter.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "ACF2C0073ABCDEFF00AAA300"
+               BuildableName = "fitness_exporterTests.xctest"
+               BlueprintName = "fitness_exporterTests"
+               ReferencedContainer = "container:fitness_exporter.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -29,6 +43,18 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "ACF2C0073ABCDEFF00AAA300"
+               BuildableName = "fitness_exporterTests.xctest"
+               BlueprintName = "fitness_exporterTests"
+               ReferencedContainer = "container:fitness_exporter.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

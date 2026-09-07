@@ -13,6 +13,8 @@ final class SensorBag {
 
     var snapshot: [SensorEvent] { queue.sync { events } }
 
+    var isEmpty: Bool { queue.sync { events.isEmpty } }
+
     func reset() {
         queue.sync { events.removeAll() }
     }
@@ -22,7 +24,7 @@ extension SensorBag {
     /// Saves collected sensor data into a binary file.
     func saveBinary(to fileURL: URL) throws {
         let data = _serializeV1(snapshot)
-        try data.write(to: fileURL)
+        try data.write(to: fileURL, options: .atomic)
     }
 
     func _serializeV1(_ events: [SensorEvent]) -> Data {

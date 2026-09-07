@@ -10,6 +10,33 @@ import OSLog
 import UIKit
 import UserNotifications
 
+private final class BackgroundTaskCompletionGate {
+    private let lock = NSLock()
+    private let task: BGTask
+    private var completed = false
+
+    init(task: BGTask) {
+        self.task = task
+    }
+
+    var isCompleted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return completed
+    }
+
+    func complete(success: Bool) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        lock.unlock()
+        task.setTaskCompleted(success: success)
+    }
+}
+
 class AppDelegate: UIResponder, UIApplicationDelegate {
     static let BG_APP_REFRESH_IDENTIFIER =
         "com.artemz.fitness_exporter.app_refresh"
@@ -58,6 +85,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             "App launched with background fetch enabled", log: OSLog.default,
             type: .info)
         CustomLogger.log("[App] App launched with background fetch enabled")
+        CrashDiagnosticsReporter.shared.start()
 
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: AppDelegate.BG_APP_REFRESH_IDENTIFIER,
@@ -87,22 +115,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Schedule the next task
         scheduleAppRefreshTask()
 
-        task.expirationHandler = {
-            CustomLogger.log("[App] App refresh task is about to expire")
-            task.setTaskCompleted(success: true)
-        }
-
-        let exporter = IncrementalExporter()
-        exporter.run(
-            sampleTypes: ExportConstants.getSampleTypesOfInterest(),
-            batchSize: 60 * 60 * 24 * 3
-        ) { status in
-            CustomLogger.log("[App] HK incremental export finished: \(status ?? "nil")")
-            DirectoryUploader.uploadAllFromStore(stopOnError: false) { fileStatus in
-                CustomLogger.log("[App] Background file upload finished: \(fileStatus ?? "nil")")
-                task.setTaskCompleted(success: true)
-            }
-        }
+        runBackgroundExportAndUpload(
+            task: task,
+            batchSize: 60 * 60 * 24 * 3,
+            label: "app refresh"
+        )
     }
 
     func handleProcessingTask(task: BGProcessingTask) {
@@ -111,24 +128,65 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Schedule the next processing task
         scheduleProcessingTask()
 
+        runBackgroundExportAndUpload(
+            task: task,
+            batchSize: 60 * 60 * 24 * 10,
+            label: "processing"
+        )
+    }
+
+    private func runBackgroundExportAndUpload(
+        task: BGTask,
+        batchSize: TimeInterval,
+        label: String
+    ) {
+        let completionGate = BackgroundTaskCompletionGate(task: task)
         task.expirationHandler = {
-            CustomLogger.log("[App] Processing task is about to expire")
-            task.setTaskCompleted(success: true)
+            CustomLogger.log("[App] Background \(label) task is about to expire")
+            completionGate.complete(success: false)
+        }
+
+        if RecordingSessionJournal.hasActiveSession {
+            CustomLogger.log(
+                "[App] Continuous recording is active; deferring HealthKit reads during \(label)"
+            )
+            runBackgroundUpload(completionGate: completionGate, label: label)
+            return
         }
 
         let exporter = IncrementalExporter()
         exporter.run(
             sampleTypes: ExportConstants.getSampleTypesOfInterest(),
-            batchSize: 60 * 60 * 24 * 10
+            batchSize: batchSize
         ) { status in
-            CustomLogger.log("[App] HK processing export finished: \(status ?? "nil")")
-            DirectoryUploader.uploadAllFromStore(stopOnError: false) { fileStatus in
-                CustomLogger.log("[App] Background file upload finished: \(fileStatus ?? "nil")")
-                task.setTaskCompleted(success: true)
+            guard !completionGate.isCompleted else { return }
+            CustomLogger.log(
+                "[App] HK \(label) export finished: \(status ?? "nil")"
+            )
+            if let status {
+                CustomLogger.log("[App][Error] HK \(label) export failed: \(status)")
             }
+            self.runBackgroundUpload(
+                completionGate: completionGate,
+                label: label,
+                priorError: status
+            )
         }
     }
 
+    private func runBackgroundUpload(
+        completionGate: BackgroundTaskCompletionGate,
+        label: String,
+        priorError: String? = nil
+    ) {
+        DirectoryUploader.uploadAllFromStore(stopOnError: false) { status in
+            guard !completionGate.isCompleted else { return }
+            CustomLogger.log(
+                "[App] Background \(label) file upload finished: \(status ?? "nil")"
+            )
+            completionGate.complete(success: priorError == nil && status == nil)
+        }
+    }
 }
 
 // MARK: - UNUserNotificationCenterDelegate
@@ -136,10 +194,6 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        var options: UNNotificationPresentationOptions = [.alert, .sound, .badge]
-        if #available(iOS 14.0, *) {
-            options.insert([.banner, .list])
-        }
-        completionHandler(options)
+        completionHandler([.banner, .list, .sound, .badge])
     }
 }
