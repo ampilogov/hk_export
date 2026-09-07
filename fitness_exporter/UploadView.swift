@@ -55,21 +55,13 @@ private struct UploadDirectorySection: View {
     let dir: UploadDirectory
     let trigger: Int
     let onRemove: () -> Void
-    @State private var resolvedURL: URL?
-    @State private var securityScopeActive = false
-    @State private var files: [URL] = []
-    @State private var doneMap: [String: UploadDoneRecord] = [:]
-    @State private var isLoadingDoneMap: Bool = false
+    @State private var summary: UploadDirectorySummary?
+    @State private var isRefreshing = false
+    @State private var refreshID = UUID()
     @State private var errorText: String?
     @State private var isUploading: Bool = false
     @State private var confirmRemoveDir: Bool = false
     @State private var confirmRemoveDone: Bool = false
-
-    private var totalCount: Int { files.count }
-    private var pendingCount: Int {
-        files.filter { !isFileUploaded($0) }.count
-    }
-    private var uploadedCount: Int { max(0, totalCount - pendingCount) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -78,16 +70,24 @@ private struct UploadDirectorySection: View {
             }
 
             HStack {
-                if isLoadingDoneMap {
-                    Text("Pending ? / Total \(totalCount)")
+                if let summary {
+                    Text("Pending \(summary.pendingCount) / Total \(summary.totalCount)")
+                    if isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
                 } else {
-                    Text("Pending \(pendingCount) / Total \(totalCount)")
+                    ProgressView("Scanning…")
+                        .controlSize(.small)
                 }
                 Spacer()
                 Button("Upload", action: uploadAll)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(isUploading || isLoadingDoneMap || pendingCount == 0)
+                    .disabled(
+                        isUploading || isRefreshing || summary?.pendingCount == 0
+                            || summary == nil
+                    )
             }
 
             HStack {
@@ -110,12 +110,11 @@ private struct UploadDirectorySection: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.orange)
-                .disabled(isLoadingDoneMap || uploadedCount == 0)
+                .disabled(isRefreshing || summary?.uploadedCount == 0 || summary == nil)
             }
         }
-        .onAppear(perform: resolveAndScan)
-        .onDisappear(perform: stopAccessIfNeeded)
-        .onChange(of: trigger) { _ in
+        .onAppear(perform: loadCachedSummaryAndRefresh)
+        .onChange(of: trigger) { _, _ in
             uploadAll()
         }
         .alert("Remove directory?", isPresented: $confirmRemoveDir) {
@@ -132,67 +131,89 @@ private struct UploadDirectorySection: View {
         }
     }
 
-    private func resolveAndScan() {
-        if let url = UploadHelper.resolveURL(from: dir.bookmark) {
-            resolvedURL = url
-            securityScopeActive = url.startAccessingSecurityScopedResource()
-            refreshFileList()
-        } else {
-            errorText = "Cannot access directory"
+    private func loadCachedSummaryAndRefresh() {
+        if summary == nil {
+            summary = UploadSummaryCache.load(directoryID: dir.id)
         }
+        refreshInventory()
     }
 
-    private func stopAccessIfNeeded() {
-        if securityScopeActive, let url = resolvedURL {
-            url.stopAccessingSecurityScopedResource()
-            securityScopeActive = false
-        }
-    }
+    private func refreshInventory() {
+        let requestID = UUID()
+        refreshID = requestID
+        isRefreshing = true
+        let directory = dir
 
-    private func refreshFileList() {
-        guard let url = resolvedURL else { return }
-        do {
-            self.files = try UploadHelper.listFiles(in: url)
-            self.errorText = nil
-        } catch {
-            self.files = []
-            self.isLoadingDoneMap = false
-            self.errorText = error.localizedDescription
-            CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
-            return
-        }
-        self.isLoadingDoneMap = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let map = UploadHelper.loadDoneMap(for: url)
+            let result: Result<UploadDirectorySummary, Error>
+            if let url = UploadHelper.resolveURL(from: directory.bookmark) {
+                let hasAccess = url.startAccessingSecurityScopedResource()
+                result = Result {
+                    try UploadHelper.inventory(in: url).summary
+                }
+                if hasAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            } else {
+                result = .failure(UploadCoreError.invalidBookmark)
+            }
+
             DispatchQueue.main.async {
-                self.doneMap = map
-                self.isLoadingDoneMap = false
+                guard self.refreshID == requestID else { return }
+                self.isRefreshing = false
+                switch result {
+                case .success(let newSummary):
+                    self.summary = newSummary
+                    UploadSummaryCache.store(
+                        newSummary,
+                        directoryID: directory.id
+                    )
+                    self.errorText = nil
+                case .failure(let error):
+                    self.summary = nil
+                    self.errorText = error.localizedDescription
+                    CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
+                }
             }
         }
-    }
-
-    private func isFileUploaded(_ url: URL) -> Bool {
-        guard let rec = doneMap[url.lastPathComponent] else { return false }
-        return UploadHelper.recordMatchesFile(rec, fileURL: url)
     }
 
     private func removeDoneFiles() {
-        guard let base = resolvedURL else { return }
-        let doneDir = base.appendingPathComponent(".done", isDirectory: true)
-        let fm = FileManager.default
-        if let entries = try? fm.contentsOfDirectory(at: doneDir, includingPropertiesForKeys: nil, options: []) {
-            for e in entries {
-                try? fm.removeItem(at: e)
+        isRefreshing = true
+        let directory = dir
+        DispatchQueue.global(qos: .utility).async {
+            let error: Error?
+            if let base = UploadHelper.resolveURL(from: directory.bookmark) {
+                let hasAccess = base.startAccessingSecurityScopedResource()
+                do {
+                    try UploadHelper.removeLegacyDoneRecords(in: base)
+                    error = nil
+                } catch let removalError {
+                    error = removalError
+                }
+                if hasAccess {
+                    base.stopAccessingSecurityScopedResource()
+                }
+            } else {
+                error = UploadCoreError.invalidBookmark
+            }
+
+            DispatchQueue.main.async {
+                if let error {
+                    self.isRefreshing = false
+                    self.errorText = error.localizedDescription
+                    CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
+                } else {
+                    self.refreshInventory()
+                }
             }
         }
-        self.doneMap.removeAll()
     }
 
     // Upload handled via shared DirectoryUploader now
 
     private func uploadAll() {
         guard !isUploading else { return }
-        guard let _ = resolvedURL else { return }
         guard let cfg = DirectoryUploader.getServerAndSender() else { self.errorText = "Server URL or Sender is empty"; return }
 
         // Prepare list of pending files
@@ -201,7 +222,7 @@ private struct UploadDirectorySection: View {
         DirectoryUploader.uploadAll(dir: dir, server: cfg.server, sender: cfg.sender, stopOnError: true) { err in
             DispatchQueue.main.async {
                 if let err = err { self.errorText = err }
-                self.refreshFileList()
+                self.refreshInventory()
                 self.isUploading = false
             }
         }

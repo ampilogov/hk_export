@@ -300,6 +300,125 @@ final class SensorBagCompatibilityTests: XCTestCase {
             ]
         )
     }
+
+    func test_uploadInventory_countsEachFileOnceAgainstDoneState() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let fileCount = 500
+        let uploadedCount = 125
+        var files: [URL] = []
+        for index in 0..<fileCount {
+            let file = base.appendingPathComponent(String(format: "%05d.bin", index))
+            XCTAssertTrue(fm.createFile(atPath: file.path, contents: Data([UInt8(index % 255)])))
+            files.append(file)
+        }
+        for file in files.prefix(uploadedCount) {
+            XCTAssertNotNil(UploadHelper.markDone(file: file, base: base))
+        }
+
+        let initial = try UploadHelper.inventory(in: base)
+        XCTAssertEqual(initial.totalCount, fileCount)
+        XCTAssertEqual(initial.uploadedCount, uploadedCount)
+        XCTAssertEqual(initial.pendingCount, fileCount - uploadedCount)
+
+        try Data([1, 2]).write(to: files[0], options: .atomic)
+        let afterMutation = try UploadHelper.inventory(in: base)
+        XCTAssertEqual(afterMutation.uploadedCount, uploadedCount - 1)
+        XCTAssertEqual(afterMutation.pendingCount, fileCount - uploadedCount + 1)
+    }
+
+    func test_uploadCoordinator_coalescesMatchingJobsAndSerializesDifferentJobs() {
+        let coordinator = UploadSingleFlightCoordinator()
+        let allCompletions = expectation(description: "all callers completed")
+        allCompletions.expectedFulfillmentCount = 3
+        let stateLock = NSLock()
+        var operationStarts = 0
+        var runningOperations = 0
+        var maximumConcurrentOperations = 0
+
+        func operation() -> UploadSingleFlightCoordinator.Operation {
+            { finish in
+                stateLock.lock()
+                operationStarts += 1
+                runningOperations += 1
+                maximumConcurrentOperations = max(
+                    maximumConcurrentOperations,
+                    runningOperations
+                )
+                stateLock.unlock()
+
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: .now() + 0.05
+                ) {
+                    stateLock.lock()
+                    runningOperations -= 1
+                    stateLock.unlock()
+                    finish(nil)
+                }
+            }
+        }
+
+        coordinator.submit(
+            key: "same",
+            operation: operation()
+        ) { _ in allCompletions.fulfill() }
+        coordinator.submit(
+            key: "same",
+            operation: operation()
+        ) { _ in allCompletions.fulfill() }
+        coordinator.submit(
+            key: "different",
+            operation: operation()
+        ) { _ in allCompletions.fulfill() }
+
+        wait(for: [allCompletions], timeout: 2)
+        stateLock.lock()
+        let finalStarts = operationStarts
+        let finalMaximum = maximumConcurrentOperations
+        stateLock.unlock()
+        XCTAssertEqual(finalStarts, 2)
+        XCTAssertEqual(finalMaximum, 1)
+    }
+
+    func test_uploadSummaryCache_roundTripsByDirectory() throws {
+        let suiteName = "UploadSummaryCacheTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let directoryID = UUID()
+        let summary = UploadDirectorySummary(
+            totalCount: 50_000,
+            pendingCount: 123,
+            uploadedCount: 49_877
+        )
+
+        UploadSummaryCache.store(
+            summary,
+            directoryID: directoryID,
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            UploadSummaryCache.load(
+                directoryID: directoryID,
+                defaults: defaults
+            ),
+            summary
+        )
+
+        UploadSummaryCache.remove(
+            directoryID: directoryID,
+            defaults: defaults
+        )
+        XCTAssertNil(
+            UploadSummaryCache.load(
+                directoryID: directoryID,
+                defaults: defaults
+            )
+        )
+    }
 }
 
 private final class FailingRecordingNotificationCenter: RecordingNotificationScheduling {

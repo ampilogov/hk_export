@@ -38,7 +38,7 @@ Find the causes of crashes or unexpected app termination during long recordings.
 
 The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
 
-**Status:** In progress — current scan, completion-state, and upload entry points are mapped; begin with asynchronous cached directory summaries and single-flight coordination
+**Status:** In progress — cached off-main directory summaries and single-flight upload coordination are implemented; the transactional completion index is next
 
 ### R4 — Automatically reconnect and resume recording
 
@@ -91,7 +91,7 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | In progress | Move directory summaries off the main thread and establish one single-flight upload coordinator |
+| R3 | File and upload efficiency | In progress | Replace per-file `.done` sidecars with a safely migrated transactional index |
 | R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
 | R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
@@ -131,21 +131,18 @@ Current observations:
 
 - Each recording window creates a separate `.bin` file.
 - Each uploaded file creates a separate `.done` JSON sidecar, further increasing the number of filesystem entries.
-- The Upload screen enumerates and sorts the directory synchronously, reads every sidecar, and repeatedly checks file metadata while SwiftUI renders.
 - Uploads are serial, and each file is fully loaded, wrapped in a property list, and gzip-compressed in memory.
 - HealthKit backfill reloads and rewrites its complete JSON index after each processed recording, which scales especially poorly for a large backlog.
 - Continuous recording does not currently upload a segment when it is finalized. Upload is triggered only after the user stops recording or later by opportunistic background jobs, which iOS may delay substantially.
-- There is no global upload coordinator. Manual upload, recording-stop upload, app refresh, and background processing can concurrently scan and upload the same pending files.
 - An unreachable server can perform four attempts per file without a collection-level circuit breaker.
 - Upload logging magnifies backlog work: each file emits multiple persistent logs, and each log rebuilds and rewrites up to 400 records in `UserDefaults`.
 - Upload uses a default foreground `URLSession`, so the operating system does not own continuation of a transfer after suspension or termination.
 
 Proposed approach:
 
-- Immediate client-only improvement: display cached aggregate status immediately and scan asynchronously on a dedicated actor. Never perform file metadata reads from a SwiftUI computed property.
 - Replace per-file `.done` records and the HealthKit JSON index with one transactional SQLite index.
 - Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
-- Introduce one upload actor/coordinator with a durable pending queue, bounded concurrency, and deduplication across UI, recording, and background triggers.
+- Extend the single-flight upload coordinator with a durable pending queue while retaining deduplication across UI, recording, and background triggers.
 - Mark every finalized five-minute package pending immediately and begin its transfer while recording continues. Permit both Wi-Fi and cellular, including expensive-network access; do not wait for recording Stop.
 - Use a background `URLSession` and file-backed request bodies so the system can continue eligible transfers while the app is suspended and upload memory remains bounded.
 - Add a collection-level circuit breaker and retry budget. Immediate sending over cellular is required, but a confirmed server/network outage must pause and reschedule the batch instead of retrying every pending file continuously.
