@@ -212,7 +212,7 @@ class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 }
                 self?.eventSubject.send(event)
                 if
-                    let stream = Self.streamKind(for: event),
+                    let stream = event.recordingHealthStream,
                     self?.shouldPublishReady(stream: stream) == true
                 {
                     DispatchQueue.main.async { [weak self] in
@@ -423,19 +423,6 @@ class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         readinessGeneration = generation
         streamsReportedReady.removeAll()
         readinessLock.unlock()
-    }
-
-    private static func streamKind(for event: SensorEvent) -> SensorStreamKind? {
-        switch event.data {
-        case .hrSamples:
-            return .hr
-        case .ecgSamples:
-            return .ecg
-        case .accSamples:
-            return .acc
-        case .battery, .hrvStage, .location, .custom:
-            return nil
-        }
     }
 
     private static func isPolarH10(name: String?) -> Bool {

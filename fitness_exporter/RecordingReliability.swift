@@ -243,18 +243,35 @@ final class RecordingWatchdog {
     }
 }
 
+protocol RecordingNotificationScheduling: AnyObject {
+    func add(_ request: UNNotificationRequest) async throws
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String])
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String])
+}
+
+extension UNUserNotificationCenter: RecordingNotificationScheduling {}
+
 final class RecordingInterruptionNotifier {
     static let reconnectingIdentifier = "ContinuousRecording.Reconnecting"
     static let attentionIdentifier = "ContinuousRecording.ConnectionAttention"
     static let reconnectingDelay: TimeInterval = 10
     static let attentionDelay: TimeInterval = 60
 
-    private let center = UNUserNotificationCenter.current()
+    private let center: RecordingNotificationScheduling
     private var activeSessionID: UUID?
     private var generation = 0
     private var notificationOperation: Task<Void, Never>?
 
-    func begin(sessionID: UUID, reason: String, elapsed: TimeInterval = 0) {
+    init(center: RecordingNotificationScheduling = UNUserNotificationCenter.current()) {
+        self.center = center
+    }
+
+    func begin(
+        sessionID: UUID,
+        reason: String,
+        elapsed: TimeInterval = 0,
+        failure: @escaping (String) -> Void = { _ in }
+    ) {
         guard activeSessionID != sessionID else { return }
         activeSessionID = sessionID
         generation += 1
@@ -272,15 +289,22 @@ final class RecordingInterruptionNotifier {
             else {
                 return
             }
+            var schedulingFailures: [String] = []
             for request in requests {
                 do {
                     try await notifier.center.add(request)
                 } catch {
+                    let message =
+                        "Could not schedule \(request.identifier): "
+                        + error.localizedDescription
                     CustomLogger.log(
-                        "[Continuous][Notification] Could not schedule "
-                            + "\(request.identifier): \(error.localizedDescription)"
+                        "[Continuous][Notification] \(message)"
                     )
+                    schedulingFailures.append(message)
                 }
+            }
+            if !schedulingFailures.isEmpty {
+                failure(schedulingFailures.joined(separator: "\n"))
             }
         }
     }

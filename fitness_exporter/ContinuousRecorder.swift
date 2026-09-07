@@ -21,6 +21,19 @@ private final class BackgroundTaskToken {
     }
 }
 
+enum RecordingInterruptionTiming {
+    static func estimatedStart(
+        detectedAt: Date,
+        alreadyMissingFor elapsed: TimeInterval
+    ) -> Date {
+        detectedAt.addingTimeInterval(-max(0, elapsed))
+    }
+
+    static func durationMilliseconds(from start: Date, to end: Date) -> Int {
+        max(0, Int(end.timeIntervalSince(start) * 1_000))
+    }
+}
+
 /// Handles periodic recording of raw sensor data and updates a Live Activity
 /// with the latest reception timestamps for RR/ECG/ACC streams.
 final class ContinuousRecorder: ObservableObject {
@@ -59,7 +72,7 @@ final class ContinuousRecorder: ObservableObject {
     }
 
     private struct ActiveInterruption {
-        let startedAt: Date
+        let missingSince: Date
         let reason: String
     }
 
@@ -125,7 +138,7 @@ final class ContinuousRecorder: ObservableObject {
     private var retainedBatches: [PendingBatch] = []
     private var sessionsAwaitingFinalization = Set<UUID>()
     private var activeInterruption: ActiveInterruption?
-    private var lastStreamRestartRequests: [SensorStreamKind: Date] = [:]
+    private var restartRequestedStreams = Set<SensorStreamKind>()
 
     /// Last reception timestamps for each sensor stream.
     @Published var lastRR: Date?
@@ -238,7 +251,7 @@ final class ContinuousRecorder: ObservableObject {
         lastWatchdogECG = nil
         lastWatchdogACC = nil
         activeInterruption = nil
-        lastStreamRestartRequests.removeAll()
+        restartRequestedStreams.removeAll()
         interruptionMessage = nil
         interruptionNotifier.cancelAll()
         let recordingID = UUID()
@@ -263,7 +276,7 @@ final class ContinuousRecorder: ObservableObject {
         subscriptions.removeAll()
         interruptionNotifier.cancelAll()
         activeInterruption = nil
-        lastStreamRestartRequests.removeAll()
+        restartRequestedStreams.removeAll()
         interruptionMessage = nil
         endLiveActivity()
         activeRecordingID = nil
@@ -291,7 +304,8 @@ final class ContinuousRecorder: ObservableObject {
         let stale = lastReceived.compactMap {
             stream, lastSeen -> (stream: SensorStreamKind, age: TimeInterval)? in
                 let age = now.timeIntervalSince(lastSeen ?? captureStart)
-                return age > Self.staleStreamMaximumAge ? (stream, age) : nil
+                return age > Self.staleStreamMaximumAge
+                    ? (stream, age) : nil
             }
         let staleStreams = Set(stale.map { $0.stream })
 
@@ -342,20 +356,30 @@ final class ContinuousRecorder: ObservableObject {
     ) {
         guard let recordingID = activeRecordingID else { return }
 
-        for stream in restartStreams {
-            if let lastRequest = lastStreamRestartRequests[stream],
-                date.timeIntervalSince(lastRequest) < 30
-            {
-                continue
-            }
-            lastStreamRestartRequests[stream] = date
+        for stream in restartStreams
+        where restartRequestedStreams.insert(stream).inserted {
             manager.restartStream(stream, reason: "No data received for 10 seconds")
         }
 
-        guard activeInterruption == nil else { return }
+        let estimatedStart = RecordingInterruptionTiming.estimatedStart(
+            detectedAt: date,
+            alreadyMissingFor: notificationElapsed
+        )
+        if let interruption = activeInterruption {
+            if estimatedStart < interruption.missingSince {
+                activeInterruption = ActiveInterruption(
+                    missingSince: estimatedStart,
+                    reason: interruption.reason
+                )
+            }
+            return
+        }
         let safeReason = reason.replacingOccurrences(of: "\n", with: " ")
         interruptionMessage = safeReason
-        activeInterruption = ActiveInterruption(startedAt: date, reason: safeReason)
+        activeInterruption = ActiveInterruption(
+            missingSince: estimatedStart,
+            reason: safeReason
+        )
         ingestionQueue.sync {
             recorder.markCustomEvent(
                 "system.continuous_gap_start reason=\(safeReason.prefix(160))",
@@ -369,7 +393,14 @@ final class ContinuousRecorder: ObservableObject {
             sessionID: recordingID,
             reason: safeReason,
             elapsed: notificationElapsed
-        )
+        ) { [weak self] message in
+            self?.attention = RecordingAttention(
+                title: "Recording alert failed",
+                message: message,
+                offersWriteRetry: false,
+                endedRecording: false
+            )
+        }
         CustomLogger.log("[Continuous][Interrupted] \(safeReason)")
     }
 
@@ -388,9 +419,9 @@ final class ContinuousRecorder: ObservableObject {
             return
         }
 
-        let durationMilliseconds = max(
-            0,
-            Int(date.timeIntervalSince(interruption.startedAt) * 1_000)
+        let durationMilliseconds = RecordingInterruptionTiming.durationMilliseconds(
+            from: interruption.missingSince,
+            to: date
         )
         ingestionQueue.sync {
             recorder.markCustomEvent(
@@ -399,7 +430,7 @@ final class ContinuousRecorder: ObservableObject {
             )
         }
         activeInterruption = nil
-        lastStreamRestartRequests.removeAll()
+        restartRequestedStreams.removeAll()
         interruptionMessage = nil
         interruptionNotifier.resolve(sessionID: recordingID)
         CustomLogger.log(
@@ -416,9 +447,9 @@ final class ContinuousRecorder: ObservableObject {
             interruptionNotifier.cancelAll()
             return
         }
-        let durationMilliseconds = max(
-            0,
-            Int(date.timeIntervalSince(interruption.startedAt) * 1_000)
+        let durationMilliseconds = RecordingInterruptionTiming.durationMilliseconds(
+            from: interruption.missingSince,
+            to: date
         )
         ingestionQueue.sync {
             recorder.markCustomEvent(
@@ -427,7 +458,7 @@ final class ContinuousRecorder: ObservableObject {
             )
         }
         activeInterruption = nil
-        lastStreamRestartRequests.removeAll()
+        restartRequestedStreams.removeAll()
         interruptionMessage = nil
         interruptionNotifier.resolve(sessionID: recordingID)
     }
@@ -467,14 +498,20 @@ final class ContinuousRecorder: ObservableObject {
         var shouldPublish = false
         switch event.data {
         case .hrSamples:
-            ingestionState.lastRR = event.timestamp
-            shouldPublish = true
+            if event.recordingHealthStream == .hr {
+                ingestionState.lastRR = event.timestamp
+                shouldPublish = true
+            }
         case .ecgSamples:
-            ingestionState.lastECG = event.timestamp
-            shouldPublish = true
+            if event.recordingHealthStream == .ecg {
+                ingestionState.lastECG = event.timestamp
+                shouldPublish = true
+            }
         case .accSamples:
-            ingestionState.lastACC = event.timestamp
-            shouldPublish = true
+            if event.recordingHealthStream == .acc {
+                ingestionState.lastACC = event.timestamp
+                shouldPublish = true
+            }
         default:
             break
         }

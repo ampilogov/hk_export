@@ -10,6 +10,24 @@ enum SensorStreamKind: String, CaseIterable, Hashable {
     case acc
 }
 
+extension SensorEvent {
+    /// The stream advanced by this event for recording-health purposes.
+    /// Empty packets are still persisted, but they must not conceal a gap in
+    /// the samples needed to reconstruct RR, ECG, or ACC data.
+    var recordingHealthStream: SensorStreamKind? {
+        switch data {
+        case .hrSamples(let batch):
+            return batch.samples.contains(where: { !$0.rrIntervals.isEmpty }) ? .hr : nil
+        case .ecgSamples(let batch):
+            return batch.samples.isEmpty ? nil : .ecg
+        case .accSamples(let batch):
+            return batch.samples.isEmpty ? nil : .acc
+        case .battery, .hrvStage, .location, .custom:
+            return nil
+        }
+    }
+}
+
 enum BluetoothLifecycleEvent: Equatable {
     case connecting
     case connected(generation: Int)
@@ -369,6 +387,16 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
     func restartStream(_ stream: SensorStreamKind, reason: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self, let generation = self.currentGeneration else { return }
+            guard
+                self.retryWorkItems[stream] == nil,
+                !self.pendingStreams.contains(stream)
+            else {
+                CustomLogger.log(
+                    "[Polar][\(stream.rawValue.uppercased())] Restart already pending; "
+                        + "keeping the existing retry schedule"
+                )
+                return
+            }
             self.clearStream(stream)
             self.lifecycleSubject.send(
                 .streamFailed(stream, generation: generation, message: reason)
@@ -489,7 +517,9 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
                             data: .ecgSamples(ECGSamples(samples: samples))
                         )
                         self.eventSubject.send(event)
-                        self.markStreamHealthy(.ecg, generation: generation)
+                        if event.recordingHealthStream == .ecg {
+                            self.markStreamHealthy(.ecg, generation: generation)
+                        }
                     }
                 case .error(let err):
                     self.handleStreamTermination(
@@ -535,7 +565,9 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
                             data: .accSamples(AccSamples(samples: samples))
                         )
                         self.eventSubject.send(event)
-                        self.markStreamHealthy(.acc, generation: generation)
+                        if event.recordingHealthStream == .acc {
+                            self.markStreamHealthy(.acc, generation: generation)
+                        }
                     }
                 case .error(let err):
                     self.handleStreamTermination(
@@ -583,7 +615,9 @@ final class PolarSDKBackend: NSObject, PolarBleApiObserver, PolarBleApiPowerStat
                             data: .hrSamples(HRSamples(samples: samples))
                         )
                         self.eventSubject.send(event)
-                        self.markStreamHealthy(.hr, generation: generation)
+                        if event.recordingHealthStream == .hr {
+                            self.markStreamHealthy(.hr, generation: generation)
+                        }
                     }
                 case .error(let err):
                     self.handleStreamTermination(

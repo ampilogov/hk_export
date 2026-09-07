@@ -196,6 +196,15 @@ struct HRVView: View {
                         Button("Stop Recording") { showStopRecordingConfirm = true }
                     }
                     if selectedMode == .orthostatic {
+                        if !manager.isReadyForRecording {
+                            Text(
+                                manager.isConnected
+                                    ? "Recovering Polar sensor streams…"
+                                    : "Polar disconnected — test remains active while reconnecting…"
+                            )
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                        }
                         if orthoUIPhase == .transition {
                             Button("Start Standing") {
                                 orthoTester?.startStanding()
@@ -331,7 +340,7 @@ struct HRVView: View {
             }
             manager.disconnectPublisher
                 .sink { _ in
-                    if connectionPhase == .recording && selectedMode == .continuous {
+                    if connectionPhase == .recording {
                         return
                     }
                     connectionPhase = .notConnected
@@ -586,7 +595,7 @@ struct HRVView: View {
         startDate = nil
         standReminderTimer?.invalidate()
         standReminderTimer = nil
-        connectionPhase = .connected
+        connectionPhase = manager.isConnected ? .connected : .notConnected
         isProcessing = false
         orthoTester = nil
     }

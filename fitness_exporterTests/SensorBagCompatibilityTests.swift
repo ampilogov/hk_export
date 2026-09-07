@@ -213,4 +213,110 @@ final class SensorBagCompatibilityTests: XCTestCase {
         )
         XCTAssertEqual(remainingAttentionTrigger.timeInterval, 48)
     }
+
+    func test_recordingHealth_requiresActualSamples() {
+        let timestamp = Date()
+        let emptyRR = SensorEvent(
+            timestamp: timestamp,
+            data: .hrSamples(
+                HRSamples(
+                    samples: [
+                        HRSample(
+                            value: 60,
+                            contactSupported: true,
+                            contactDetected: false,
+                            energyExpended: nil,
+                            rrIntervals: []
+                        )
+                    ]
+                )
+            )
+        )
+        let actualRR = SensorEvent(
+            timestamp: timestamp,
+            data: .hrSamples(
+                HRSamples(
+                    samples: [
+                        HRSample(
+                            value: 60,
+                            contactSupported: true,
+                            contactDetected: true,
+                            energyExpended: nil,
+                            rrIntervals: [1.0]
+                        )
+                    ]
+                )
+            )
+        )
+        let emptyECG = SensorEvent(
+            timestamp: timestamp,
+            data: .ecgSamples(ECGSamples(samples: []))
+        )
+        let emptyACC = SensorEvent(
+            timestamp: timestamp,
+            data: .accSamples(AccSamples(samples: []))
+        )
+
+        XCTAssertNil(emptyRR.recordingHealthStream)
+        XCTAssertEqual(actualRR.recordingHealthStream, .hr)
+        XCTAssertNil(emptyECG.recordingHealthStream)
+        XCTAssertNil(emptyACC.recordingHealthStream)
+    }
+
+    func test_interruptionTiming_includesSilenceBeforeDetection() {
+        let detectedAt = Date(timeIntervalSince1970: 100)
+        let missingSince = RecordingInterruptionTiming.estimatedStart(
+            detectedAt: detectedAt,
+            alreadyMissingFor: 15
+        )
+
+        XCTAssertEqual(missingSince, Date(timeIntervalSince1970: 85))
+        XCTAssertEqual(
+            RecordingInterruptionTiming.durationMilliseconds(
+                from: missingSince,
+                to: Date(timeIntervalSince1970: 102)
+            ),
+            17_000
+        )
+    }
+
+    func test_interruptionNotificationSchedulingFailure_isSurfaced() async {
+        let center = FailingRecordingNotificationCenter()
+        let notifier = RecordingInterruptionNotifier(center: center)
+        let failureReported = expectation(description: "notification failure surfaced")
+
+        notifier.begin(sessionID: UUID(), reason: "test") { message in
+            XCTAssertTrue(message.contains("ContinuousRecording.Reconnecting"))
+            XCTAssertTrue(message.contains("ContinuousRecording.ConnectionAttention"))
+            failureReported.fulfill()
+        }
+
+        await fulfillment(of: [failureReported], timeout: 2)
+        XCTAssertEqual(
+            center.attemptedIdentifiers,
+            [
+                RecordingInterruptionNotifier.reconnectingIdentifier,
+                RecordingInterruptionNotifier.attentionIdentifier,
+            ]
+        )
+    }
+}
+
+private final class FailingRecordingNotificationCenter: RecordingNotificationScheduling {
+    private(set) var attemptedIdentifiers: [String] = []
+
+    func add(_ request: UNNotificationRequest) async throws {
+        attemptedIdentifiers.append(request.identifier)
+        throw TestError.failed
+    }
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+
+    private enum TestError: LocalizedError {
+        case failed
+
+        var errorDescription: String? { "Deliberate test failure" }
+    }
 }

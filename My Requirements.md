@@ -180,10 +180,11 @@ Remaining verification:
 Acceptance criteria:
 
 - A brief disconnect reconnects and resumes without user interaction.
-- Reconnection creates a new recoverable segment under the same logical session and records the gap duration.
+- Reconnection creates a new recoverable segment under the same logical session and records the gap duration from the last actual sample, not from delayed detection.
 - Intentional Stop never resumes or starts recording after a later connection recovery.
 - Duplicate callbacks cannot create duplicate sessions, alerts, or writers.
 - Repeating Stop/Start and disconnect/reconnect cycles cannot leave ECG or ACC absent while HR continues, and upload work cannot mutate Bluetooth stream state.
+- Empty SDK packets remain in the source recording but do not count as healthy RR, ECG, or ACC data.
 - The UI reports `recording` only after RR, ECG, and ACC have each delivered data for the current connection generation.
 - Reconnection behavior is covered with deterministic simulated-device tests.
 
@@ -194,6 +195,7 @@ Remaining verification:
 - **0–10 seconds:** reconnect silently; show status only in the app and Live Activity.
 - **At 10 seconds:** send one “Reconnecting” notification if the interruption is still active.
 - **At 60 seconds or after repeated failed attempts:** send one audible “Recording needs attention” notification.
+- Disconnect and SDK stream-failure callbacks schedule the 10-second and 60-second alerts immediately and therefore remain effective after suspension. A stream that becomes silently stale can only be identified while the app is executing; if iOS suspends it first, the independently pre-scheduled configurable watchdog is the process-independent fallback.
 - Verify delivery to the paired Apple Watch with the iPhone locked before considering a dedicated watchOS target.
 
 Acceptance criteria:
@@ -201,6 +203,7 @@ Acceptance criteria:
 - A disconnect shorter than 10 seconds produces no notification.
 - A persistent interruption produces one notification at each configured escalation level, not one per stream or callback.
 - Recovery cancels all obsolete pending alerts.
+- Failure to schedule an interruption alert is shown in the app with the failed notification identifier and underlying error.
 - A simulated dead process results in the pre-scheduled watchdog notification.
 - A healthy normal-use recording produces no false watchdog alert, while a deliberate notification sanity check produces one alert within the documented grace period.
 - Watch delivery is verified with the iPhone locked and the paired Apple Watch unlocked; failure to mirror must remain visible on the iPhone.
