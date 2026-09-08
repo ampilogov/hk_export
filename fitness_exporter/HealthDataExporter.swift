@@ -1140,6 +1140,10 @@ class HealthDataExporter {
 
 class HealthKitManager {
     static private(set) var authorizationErrorMessage: String?
+    private static let writeAuthorizationLock = NSLock()
+    private static var writeAuthorizationRequestCompleted = false
+    private static var writeAuthorizationRequestInFlight = false
+    private static var writeAuthorizationCallbacks: [(Bool) -> Void] = []
 
     // Unified sets of permissions used across the app
     private static func unifiedReadTypes() -> Set<HKObjectType> {
@@ -1157,6 +1161,66 @@ class HealthKitManager {
             share.append(hr)
         }
         return Set(share)
+    }
+
+    /// Request only the share permissions used by SensorBag imports. A
+    /// successful request is reused for the life of this process; individual
+    /// HealthKit saves still report revoked or denied permissions explicitly.
+    static func requestWriteAuthorization(
+        completion: @escaping (Bool) -> Void
+    ) {
+        authorizationErrorMessage = nil
+        guard HKHealthStore.isHealthDataAvailable() else {
+            let message = "Health data is not available on this device."
+            authorizationErrorMessage = message
+            CustomLogger.log("[HKM][Error] \(message)")
+            completion(false)
+            return
+        }
+
+        writeAuthorizationLock.lock()
+        if writeAuthorizationRequestCompleted {
+            writeAuthorizationLock.unlock()
+            completion(true)
+            return
+        }
+        writeAuthorizationCallbacks.append(completion)
+        guard !writeAuthorizationRequestInFlight else {
+            writeAuthorizationLock.unlock()
+            return
+        }
+        writeAuthorizationRequestInFlight = true
+        writeAuthorizationLock.unlock()
+
+        HKHealthStore().requestAuthorization(
+            toShare: unifiedShareTypes(),
+            read: []
+        ) { okay, error in
+            let success: Bool
+            if let error {
+                authorizationErrorMessage =
+                    "HealthKit write authorization failed: \(error.localizedDescription)"
+                CustomLogger.log(
+                    "[HKM][Error] Write authorization failed: \(error.localizedDescription)"
+                )
+                success = false
+            } else if !okay {
+                let message = "HealthKit did not authorize the requested writes."
+                authorizationErrorMessage = message
+                CustomLogger.log("[HKM][Error] \(message)")
+                success = false
+            } else {
+                success = true
+            }
+
+            writeAuthorizationLock.lock()
+            writeAuthorizationRequestCompleted = success
+            writeAuthorizationRequestInFlight = false
+            let callbacks = writeAuthorizationCallbacks
+            writeAuthorizationCallbacks.removeAll()
+            writeAuthorizationLock.unlock()
+            callbacks.forEach { $0(success) }
+        }
     }
 
     /// Centralized authorization request. Always asks for the same sets.

@@ -129,10 +129,13 @@ struct DateRangeExporterView: View {
     func exportDataInRange(
         from start: Date, to end: Date, server: String, sender: String
     ) {
+        guard !isProcessing else { return }
+        isProcessing = true
         HealthKitManager.initialize(startObservers: false) {
             success in
             if !success {
                 DispatchQueue.main.async {
+                    isProcessing = false
                     alertMessage =
                         HealthKitManager.authorizationErrorMessage
                         ?? "HealthKit authorization failed."
@@ -151,10 +154,13 @@ struct DateRangeExporterView: View {
     }
 
     func runIncrementalExporterAndHKObserver(server: String, sender: String) {
+        guard !isProcessing else { return }
+        isProcessing = true
         HealthKitManager.initialize(startObservers: false) {
             success in
             if !success {
                 DispatchQueue.main.async {
+                    isProcessing = false
                     alertMessage =
                         HealthKitManager.authorizationErrorMessage
                         ?? "HealthKit authorization failed."
@@ -230,11 +236,16 @@ struct DateRangeExporterView: View {
     }
 
     func startProcessing(tasks: [ProcessingTask]) {
-        DispatchQueue.main.sync {
+        let initializeState = {
             self.nextProcessingTaskIndex = 0
             self.processingTasks = tasks
             self.isProcessing = true
             UIApplication.shared.isIdleTimerDisabled = true
+        }
+        if Thread.isMainThread {
+            initializeState()
+        } else {
+            DispatchQueue.main.sync(execute: initializeState)
         }
 
         continueProcessing()
@@ -259,11 +270,13 @@ struct DateRangeExporterView: View {
 
             DispatchQueue.global(qos: .userInitiated).async {
                 task { error in
-                    alertMessage = error ?? "Success!"
-                    let success = error == nil
-                    showAlert = !success
-                    if success {
-                        continueProcessing()
+                    DispatchQueue.main.async {
+                        alertMessage = error ?? "Success!"
+                        let success = error == nil
+                        showAlert = !success
+                        if success {
+                            continueProcessing()
+                        }
                     }
                 }
             }

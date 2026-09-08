@@ -64,6 +64,57 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(actual, expected, actual.base64EncodedString())
     }
 
+    func test_v1ECGWindow_reconstructsWallTimesWithoutChangingFileFormat() throws {
+        let receivedAt = Date(timeIntervalSince1970: 100)
+        let events = [
+            SensorEvent(
+                timestamp: receivedAt,
+                data: .ecgSamples(
+                    ECGSamples(
+                        samples: [
+                            ECGSample(timestamp: 1_000_000_000, voltage: -12),
+                            ECGSample(timestamp: 1_004_000_000, voltage: 8),
+                            ECGSample(timestamp: 1_008_000_000, voltage: 34),
+                        ]
+                    )
+                )
+            )
+        ]
+        let data = SensorBag()._serializeV1(events)
+
+        let points = try SensorBagPersistence.decodeECGPoints(
+            from: data,
+            in: receivedAt.addingTimeInterval(-0.02)...receivedAt
+        )
+
+        XCTAssertEqual(points.map(\.voltage), [-12, 8, 34])
+        let offsets = points.map { $0.timestamp.timeIntervalSince(receivedAt) }
+        XCTAssertEqual(offsets.count, 3)
+        XCTAssertEqual(offsets[0], -0.008, accuracy: 0.000_001)
+        XCTAssertEqual(offsets[1], -0.004, accuracy: 0.000_001)
+        XCTAssertEqual(offsets[2], 0, accuracy: 0.000_001)
+    }
+
+    func test_v1ECGWindow_rejectsTruncatedPayload() {
+        let data = SensorBag()._serializeV1([
+            SensorEvent(
+                timestamp: Date(timeIntervalSince1970: 100),
+                data: .ecgSamples(
+                    ECGSamples(
+                        samples: [ECGSample(timestamp: 1, voltage: 2)]
+                    )
+                )
+            )
+        ]).dropLast()
+
+        XCTAssertThrowsError(
+            try SensorBagPersistence.decodeECGPoints(
+                from: Data(data),
+                in: Date.distantPast...Date.distantFuture
+            )
+        )
+    }
+
     func test_highVolumeRotation_preservesEveryDeliveredEventExactlyOnce() {
         let recorder = SensorBagRecorder()
         var completedBags: [SensorBag] = []
@@ -171,6 +222,46 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertFalse(state.wantsConnection)
     }
 
+    func test_connectionState_repeatedRecoveryNeedsAllStreamsAndStopWins() {
+        var state = BluetoothConnectionStateMachine()
+        state.requestConnection(requiredStreams: [.hr, .ecg, .acc])
+        XCTAssertTrue(state.handle(.connected(generation: 1)))
+        for stream in SensorStreamKind.allCases {
+            XCTAssertTrue(state.handle(.streamReady(stream, generation: 1)))
+        }
+        XCTAssertTrue(state.isReady)
+
+        XCTAssertTrue(
+            state.handle(.disconnected(generation: 1, pairingError: false))
+        )
+        XCTAssertEqual(state.phase, .connecting)
+        XCTAssertFalse(
+            state.handle(.disconnected(generation: 1, pairingError: false))
+        )
+
+        XCTAssertTrue(state.handle(.connected(generation: 2)))
+        XCTAssertTrue(state.handle(.streamReady(.hr, generation: 2)))
+        XCTAssertTrue(state.handle(.streamReady(.ecg, generation: 2)))
+        XCTAssertFalse(state.isReady)
+        XCTAssertTrue(state.handle(.streamReady(.acc, generation: 2)))
+        XCTAssertTrue(state.isReady)
+
+        XCTAssertTrue(
+            state.handle(
+                .streamFailed(.ecg, generation: 2, message: "retry")
+            )
+        )
+        XCTAssertFalse(state.isReady)
+        XCTAssertTrue(state.handle(.streamReady(.ecg, generation: 2)))
+        XCTAssertTrue(state.isReady)
+
+        state.requestDisconnect()
+        XCTAssertFalse(state.handle(.connected(generation: 3)))
+        XCTAssertFalse(state.handle(.streamReady(.hr, generation: 3)))
+        XCTAssertEqual(state.phase, .idle)
+        XCTAssertFalse(state.wantsConnection)
+    }
+
     func test_interruptionNotifications_haveStableStagedEscalation() throws {
         let sessionID = UUID()
         let requests = RecordingInterruptionNotifier.makeRequests(
@@ -214,6 +305,14 @@ final class SensorBagCompatibilityTests: XCTestCase {
             alreadyStale[1].trigger as? UNTimeIntervalNotificationTrigger
         )
         XCTAssertEqual(remainingAttentionTrigger.timeInterval, 48)
+
+        let attentionAlreadyDue = RecordingInterruptionNotifier.makeRequests(
+            sessionID: sessionID,
+            reason: "ACC stale",
+            elapsed: 61
+        )
+        XCTAssertNil(attentionAlreadyDue[0].trigger)
+        XCTAssertNil(attentionAlreadyDue[1].trigger)
     }
 
     func test_recordingHealth_requiresActualSamples() {
@@ -300,6 +399,231 @@ final class SensorBagCompatibilityTests: XCTestCase {
                 RecordingInterruptionNotifier.reconnectingIdentifier,
                 RecordingInterruptionNotifier.attentionIdentifier,
             ]
+        )
+    }
+
+    func test_interruptionNotifications_duplicateBeginSchedulesOnceAndResolveCancels() async {
+        let center = RecordingNotificationCenterSpy()
+        let notifier = RecordingInterruptionNotifier(center: center)
+        let scheduled = expectation(description: "both escalation alerts scheduled")
+        scheduled.expectedFulfillmentCount = 2
+        center.onAdd = { _ in scheduled.fulfill() }
+
+        let sessionID = UUID()
+        notifier.begin(sessionID: sessionID, reason: "test")
+        notifier.begin(sessionID: sessionID, reason: "duplicate callback")
+        await fulfillment(of: [scheduled], timeout: 2)
+
+        let cancelled = expectation(description: "pending and delivered alerts cancelled")
+        cancelled.expectedFulfillmentCount = 2
+        center.onRemove = { cancelled.fulfill() }
+        notifier.resolve(sessionID: sessionID)
+        await fulfillment(of: [cancelled], timeout: 2)
+
+        XCTAssertEqual(
+            center.attemptedIdentifiers,
+            [
+                RecordingInterruptionNotifier.reconnectingIdentifier,
+                RecordingInterruptionNotifier.attentionIdentifier,
+            ]
+        )
+        XCTAssertEqual(
+            center.pendingRemovalIdentifiers,
+            [
+                RecordingInterruptionNotifier.reconnectingIdentifier,
+                RecordingInterruptionNotifier.attentionIdentifier,
+            ]
+        )
+        XCTAssertEqual(
+            center.deliveredRemovalIdentifiers,
+            [
+                RecordingInterruptionNotifier.reconnectingIdentifier,
+                RecordingInterruptionNotifier.attentionIdentifier,
+            ]
+        )
+    }
+
+    func test_watchdogNotificationSchedulingFailure_isSurfaced() async {
+        let center = FailingRecordingNotificationCenter()
+        let watchdog = RecordingWatchdog(center: center)
+        let sessionID = UUID()
+        let failureReported = expectation(description: "watchdog failure surfaced")
+
+        watchdog.start(sessionID: sessionID, startedAt: Date()) { message in
+            guard message.contains(RecordingWatchdog.notificationIdentifier) else {
+                return
+            }
+            XCTAssertTrue(message.contains("Deliberate test failure"))
+            failureReported.fulfill()
+        }
+
+        await fulfillment(of: [failureReported], timeout: 2)
+        watchdog.stop(sessionID: sessionID, clearJournal: true)
+        XCTAssertEqual(
+            center.attemptedIdentifiers,
+            [RecordingWatchdog.notificationIdentifier]
+        )
+    }
+
+    func test_uploadBatchState_opensAfterTwoConsecutiveFailures() {
+        let state = UploadBatchState(consecutiveFailureLimit: 2)
+
+        XCTAssertFalse(state.recordFailure("first.bin: offline"))
+        XCTAssertTrue(state.recordFailure("second.bin: offline"))
+
+        XCTAssertTrue(state.isCircuitOpen)
+        XCTAssertEqual(state.failedCount, 2)
+        XCTAssertEqual(state.firstError, "first.bin: offline")
+    }
+
+    func test_uploadBatchState_successResetsFailureStreakAndDeferralDoesNotConsumeBudget() {
+        let state = UploadBatchState(consecutiveFailureLimit: 2)
+
+        XCTAssertFalse(state.recordFailure("first failure"))
+        state.recordDeferred("cloud file unavailable")
+        state.recordSuccess()
+        XCTAssertFalse(state.recordFailure("later failure"))
+
+        XCTAssertFalse(state.isCircuitOpen)
+        XCTAssertEqual(state.consecutiveFailureCount, 1)
+        XCTAssertEqual(state.succeededCount, 1)
+        XCTAssertEqual(state.failedCount, 2)
+        XCTAssertEqual(state.deferredCount, 1)
+        XCTAssertEqual(state.processedCount, 4)
+    }
+
+    func test_uploadBatchState_fileFailuresDoNotStarveLaterFiles() {
+        let state = UploadBatchState(consecutiveFailureLimit: 2)
+
+        XCTAssertFalse(
+            state.recordFailure(
+                "corrupt-a.bin",
+                consumesOutageBudget: false
+            )
+        )
+        XCTAssertFalse(
+            state.recordFailure(
+                "corrupt-b.bin",
+                consumesOutageBudget: false
+            )
+        )
+        XCTAssertFalse(state.isCircuitOpen)
+        XCTAssertEqual(state.failedCount, 2)
+        XCTAssertEqual(state.consecutiveFailureCount, 0)
+
+        XCTAssertFalse(state.recordFailure("server unavailable"))
+        XCTAssertTrue(state.recordFailure("server still unavailable"))
+        XCTAssertTrue(state.isCircuitOpen)
+    }
+
+    func test_uploadFailureClassification_separatesFileAndCollectionFailures() {
+        XCTAssertEqual(
+            DirectoryUploader.uploadFailure(
+                for: UploadCoreError.fileReadFailed("bad.bin")
+            ).scope,
+            .file
+        )
+        XCTAssertEqual(
+            DirectoryUploader.uploadFailure(
+                for: BackgroundUploadError.acceptedFinalization("index")
+            ).scope,
+            .file
+        )
+        XCTAssertEqual(
+            DirectoryUploader.uploadFailure(
+                for: BackgroundUploadError.persistence("job store")
+            ).scope,
+            .collection
+        )
+        XCTAssertEqual(
+            DirectoryUploader.uploadFailure(
+                for: UploadCoreError.network("offline")
+            ).scope,
+            .collection
+        )
+    }
+
+    func test_httpFailureClassification_doesNotLetRejectedFilesBlockCollection() {
+        for statusCode in [400, 409, 413, 415, 422] {
+            XCTAssertEqual(
+                BackgroundFileUploadManager.failureScope(
+                    forHTTPStatusCode: statusCode
+                ),
+                .file,
+                "HTTP \(statusCode)"
+            )
+        }
+        for statusCode in [301, 401, 403, 404, 408, 429, 500, 503] {
+            XCTAssertEqual(
+                BackgroundFileUploadManager.failureScope(
+                    forHTTPStatusCode: statusCode
+                ),
+                .collection,
+                "HTTP \(statusCode)"
+            )
+        }
+    }
+
+    func test_uploadCollectionRetryStore_persistsCooldownAndBacksOff() throws {
+        let suiteName = "UploadCollectionRetryStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let firstStore = UploadCollectionRetryStore(defaults: defaults)
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+
+        let first = firstStore.recordCircuitOpen(
+            server: "https://example.test/upload",
+            sender: "phone",
+            now: startedAt
+        )
+        XCTAssertEqual(first.failureLevel, 1)
+        XCTAssertEqual(
+            first.nextAttemptAt,
+            startedAt.addingTimeInterval(
+                UploadCollectionRetryStore.initialDelay
+            )
+        )
+
+        let relaunchedStore = UploadCollectionRetryStore(defaults: defaults)
+        XCTAssertEqual(
+            relaunchedStore.nextAttemptAt(
+                server: "https://example.test/upload",
+                sender: "phone",
+                now: startedAt
+            ),
+            first.nextAttemptAt
+        )
+        XCTAssertNil(
+            relaunchedStore.nextAttemptAt(
+                server: "https://other.test/upload",
+                sender: "phone",
+                now: startedAt
+            )
+        )
+
+        let second = relaunchedStore.recordCircuitOpen(
+            server: "https://example.test/upload",
+            sender: "phone",
+            now: first.nextAttemptAt
+        )
+        XCTAssertEqual(second.failureLevel, 2)
+        XCTAssertEqual(
+            second.nextAttemptAt,
+            first.nextAttemptAt.addingTimeInterval(
+                UploadCollectionRetryStore.initialDelay * 2
+            )
+        )
+
+        relaunchedStore.clear(
+            server: "https://example.test/upload",
+            sender: "phone"
+        )
+        XCTAssertNil(
+            firstStore.nextAttemptAt(
+                server: "https://example.test/upload",
+                sender: "phone",
+                now: startedAt
+            )
         )
     }
 
@@ -1395,6 +1719,35 @@ final class SensorBagCompatibilityTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: corruptURL), corruptData)
     }
+
+    func test_incrementalCursorReset_removesOnlyMatchingEntriesAndReportsCount() throws {
+        let suiteName = "IncrementalExporterTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let firstCursor = IncrementalExporter.USER_DEFAULTS_KEY_PREFIX + "heart-rate"
+        let secondCursor = IncrementalExporter.USER_DEFAULTS_KEY_PREFIX + "steps"
+        defaults.set(Date(), forKey: firstCursor)
+        defaults.set(Date(), forKey: secondCursor)
+        defaults.set("keep", forKey: "unrelated-setting")
+
+        let result = try IncrementalExporter.resetCursors(userDefaults: defaults)
+
+        XCTAssertEqual(result.removedEntries, 2)
+        XCTAssertNil(defaults.object(forKey: firstCursor))
+        XCTAssertNil(defaults.object(forKey: secondCursor))
+        XCTAssertEqual(defaults.string(forKey: "unrelated-setting"), "keep")
+    }
+
+    func test_incrementalCursorReset_whenEmpty_reportsZero() throws {
+        let suiteName = "IncrementalExporterTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let result = try IncrementalExporter.resetCursors(userDefaults: defaults)
+
+        XCTAssertEqual(result.removedEntries, 0)
+    }
 }
 
 private func gunzip(_ compressed: Data) throws -> Data {
@@ -1459,5 +1812,48 @@ private final class FailingRecordingNotificationCenter: RecordingNotificationSch
         case failed
 
         var errorDescription: String? { "Deliberate test failure" }
+    }
+}
+
+private final class RecordingNotificationCenterSpy: RecordingNotificationScheduling {
+    private let lock = NSLock()
+    private var addedIdentifiers: [String] = []
+    private var pendingRemovals: [String] = []
+    private var deliveredRemovals: [String] = []
+
+    var onAdd: ((String) -> Void)?
+    var onRemove: (() -> Void)?
+
+    var attemptedIdentifiers: [String] {
+        lock.withLock { addedIdentifiers }
+    }
+
+    var pendingRemovalIdentifiers: [String] {
+        lock.withLock { pendingRemovals }
+    }
+
+    var deliveredRemovalIdentifiers: [String] {
+        lock.withLock { deliveredRemovals }
+    }
+
+    func add(_ request: UNNotificationRequest) async throws {
+        lock.withLock {
+            addedIdentifiers.append(request.identifier)
+        }
+        onAdd?(request.identifier)
+    }
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
+        lock.withLock {
+            pendingRemovals.append(contentsOf: identifiers)
+        }
+        onRemove?()
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        lock.withLock {
+            deliveredRemovals.append(contentsOf: identifiers)
+        }
+        onRemove?()
     }
 }

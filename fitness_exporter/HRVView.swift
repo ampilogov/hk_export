@@ -23,11 +23,17 @@ private class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
     }
 }
 
+private struct ECGSelection: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+}
+
 struct HRVView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Binding var isProcessing: Bool
-    @StateObject private var manager: BluetoothManager
-    @StateObject private var continuousRecorder: ContinuousRecorder
+    @Binding var activeRecording: AppRecordingStatus?
+    @ObservedObject private var manager: BluetoothManager
+    @ObservedObject private var continuousRecorder: ContinuousRecorder
     @State private var subscriptions = Set<AnyCancellable>()
     @State private var derivedHR: Int = 0
     @State private var rawHR: Int = 0
@@ -50,18 +56,26 @@ struct HRVView: View {
     @State private var showCustomEventSheet: Bool = false
     @State private var customEventText: String = ""
     @State private var customEventTimestamp: Date?
+    @State private var selectedECG: ECGSelection?
     @State private var isViewVisible = false
+    @State private var hasInitializedView = false
     
     // Bridge that subscribes once to manager events and updates UI + graph
-    @StateObject private var eventBridge: HRVEventBridge
+    @ObservedObject private var eventBridge: HRVEventBridge
     
     
-    init(isProcessing: Binding<Bool>) {
+    init(
+        isProcessing: Binding<Bool>,
+        activeRecording: Binding<AppRecordingStatus?>,
+        manager: BluetoothManager,
+        continuousRecorder: ContinuousRecorder,
+        eventBridge: HRVEventBridge
+    ) {
         self._isProcessing = isProcessing
-        let manager = BluetoothManager()
-        _manager = StateObject(wrappedValue: manager)
-        _continuousRecorder = StateObject(wrappedValue: ContinuousRecorder(manager: manager))
-        _eventBridge = StateObject(wrappedValue: HRVEventBridge(manager: manager))
+        self._activeRecording = activeRecording
+        self.manager = manager
+        self.continuousRecorder = continuousRecorder
+        self.eventBridge = eventBridge
     }
     
     private enum Mode: String, CaseIterable, Identifiable {
@@ -180,7 +194,7 @@ struct HRVView: View {
                             isProcessing = true
                             startRecording()
                         }
-                        .disabled(!manager.isReadyForRecording)
+                        .disabled(!manager.isReadyForRecording || isProcessing)
                         Button("Disconnect") {
                             manager.disconnect()
                             connectionPhase = .notConnected
@@ -319,74 +333,106 @@ struct HRVView: View {
             }
             Spacer()
             if connectionPhase != .notConnected {
-                RRIntervalGraph(model: eventBridge.graphModel)
+                RRIntervalGraph(model: eventBridge.graphModel) { timestamp in
+                    guard selectedMode == .continuous else { return }
+                    selectedECG = ECGSelection(timestamp: timestamp)
+                }
                     .frame(height: 200)
+                if selectedMode == .continuous {
+                    Text("Tap an RR point to inspect its ECG neighborhood.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .padding()
         .navigationTitle("HRV")
         .onAppear {
+            if let activeRecording {
+                connectionPhase = .recording
+                startDate = activeRecording.startedAt
+                selectedMode = activeRecording.modeName == Mode.continuous.rawValue
+                    ? .continuous : .orthostatic
+            } else if manager.isConnected {
+                connectionPhase = .connected
+            }
             isViewVisible = true
             updateEventPresentationState()
-            // Ensure any persisted durations fall within our supported range so the steppers work
-            validateDurations()
-            UIApplication.shared.isIdleTimerDisabled = true
-            UNUserNotificationCenter.current().requestAuthorization(
-                options: [.alert, .sound, .badge]
-            ) { granted, error in
-                if let error = error {
-                    CustomLogger.log("Notification authorization error: \(error)")
-                }
-            }
-            manager.disconnectPublisher
-                .sink { _ in
-                    if connectionPhase == .recording {
-                        return
+            updateElapsedTimer()
+            if !hasInitializedView {
+                hasInitializedView = true
+                // Ensure persisted durations fall within the supported stepper values.
+                validateDurations()
+                UNUserNotificationCenter.current().requestAuthorization(
+                    options: [.alert, .sound, .badge]
+                ) { _, error in
+                    if let error = error {
+                        CustomLogger.log("Notification authorization error: \(error)")
                     }
-                    connectionPhase = .notConnected
-                    eventBridge.resetGraph()
                 }
-                .store(in: &subscriptions)
-            manager.$isConnected
-                .receive(on: DispatchQueue.main)
-                .sink { connected in
-                    if connected {
-                        if connectionPhase == .notConnected {
-                            connectionPhase = .connected
+                manager.disconnectPublisher
+                    .sink { _ in
+                        if connectionPhase == .recording {
+                            return
                         }
-                    } else if connectionPhase != .recording {
                         connectionPhase = .notConnected
+                        eventBridge.resetGraph()
                     }
-                }
-                .store(in: &subscriptions)
-            manager.$discoveredDevices
-                .receive(on: DispatchQueue.main)
-                .sink { devices in
-                    guard connectionPhase == .notConnected else { return }
-                    guard let lastUUID = UserDefaults.standard.string(forKey: UserDefaultsKeys.LAST_HRV_DEVICE) else { return }
-                    if let device = devices.first(where: { $0.identifier.uuidString == lastUUID }) {
-                        manager.connect(to: device)
+                    .store(in: &subscriptions)
+                manager.$isConnected
+                    .receive(on: DispatchQueue.main)
+                    .sink { connected in
+                        if connected {
+                            if connectionPhase == .notConnected {
+                                connectionPhase = .connected
+                            }
+                        } else if connectionPhase != .recording {
+                            connectionPhase = .notConnected
+                        }
                     }
+                    .store(in: &subscriptions)
+                manager.$discoveredDevices
+                    .receive(on: DispatchQueue.main)
+                    .sink { devices in
+                        guard connectionPhase == .notConnected else { return }
+                        guard let lastUUID = UserDefaults.standard.string(
+                            forKey: UserDefaultsKeys.LAST_HRV_DEVICE
+                        ) else { return }
+                        if let device = devices.first(where: {
+                            $0.identifier.uuidString == lastUUID
+                        }) {
+                            manager.connect(to: device)
+                        }
+                    }
+                    .store(in: &subscriptions)
+                if activeRecording != nil || manager.isConnected {
+                    // The app-scoped sensor owner is already active.
+                } else if let lastUUID = UserDefaults.standard.string(
+                    forKey: UserDefaultsKeys.LAST_HRV_DEVICE
+                ) {
+                    let remembered =
+                        manager.rememberedDevices.first(where: { $0.id == lastUUID })
+                        ?? BluetoothManager.RememberedDevice(
+                            id: lastUUID,
+                            name: nil,
+                            lastSeen: .distantPast
+                        )
+                    manager.connect(to: remembered)
+                } else {
+                    manager.autoScanOnPowerOn = true
+                    manager.scanForDevices()
                 }
-                .store(in: &subscriptions)
-            if let lastUUID = UserDefaults.standard.string(forKey: UserDefaultsKeys.LAST_HRV_DEVICE) {
-                let remembered =
-                    manager.rememberedDevices.first(where: { $0.id == lastUUID })
-                    ?? BluetoothManager.RememberedDevice(id: lastUUID, name: nil, lastSeen: .distantPast)
-                manager.connect(to: remembered)
-            } else {
-                manager.autoScanOnPowerOn = true
-                manager.scanForDevices()
             }
         }
         .onDisappear {
             isViewVisible = false
             updateEventPresentationState()
-            subscriptions.removeAll()
-            UIApplication.shared.isIdleTimerDisabled = false
+            timer?.invalidate()
+            timer = nil
         }
         .onChange(of: scenePhase) {
             updateEventPresentationState()
+            updateElapsedTimer()
         }
         .onReceive(continuousRecorder.$attention.compactMap { $0 }) { attention in
             guard attention.endedRecording else { return }
@@ -395,6 +441,8 @@ struct HRVView: View {
             startDate = nil
             connectionPhase = manager.isConnected ? .connected : .notConnected
             isProcessing = false
+            activeRecording = nil
+            UIApplication.shared.isIdleTimerDisabled = false
         }
         .confirmationDialog(
             "Stop recording?",
@@ -405,6 +453,7 @@ struct HRVView: View {
                 stopRecording()
                 connectionPhase = manager.isConnected ? .connected : .notConnected
                 isProcessing = false
+                activeRecording = nil
             }
             Button("Continue", role: .cancel) { }
         } message: {
@@ -470,6 +519,14 @@ struct HRVView: View {
             .padding()
             .presentationDetents([.medium])
         }
+        .sheet(item: $selectedECG) { selection in
+            ECGDetailView(centeredAt: selection.timestamp) { completion in
+                continuousRecorder.loadECGWindow(
+                    centeredAt: selection.timestamp,
+                    completion: completion
+                )
+            }
+        }
     }
 
     private func updateEventPresentationState() {
@@ -499,14 +556,16 @@ struct HRVView: View {
     }
 
     private func startRecording() {
-        startDate = Date()
+        let startedAt = Date()
+        startDate = startedAt
+        activeRecording = AppRecordingStatus(
+            startedAt: startedAt,
+            modeName: selectedMode.rawValue
+        )
+        UIApplication.shared.isIdleTimerDisabled = selectedMode == .orthostatic
         elapsedSeconds = 0
         eventBridge.resetGraph()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            if let start = startDate {
-                elapsedSeconds = Int(Date().timeIntervalSince(start))
-            }
-        }
+        updateElapsedTimer()
         if selectedMode == .orthostatic {
             orthoTester = OrthostaticHRV(manager: manager,
                                          warmupDuration: TimeInterval(warmupDurationSeconds),
@@ -570,9 +629,14 @@ struct HRVView: View {
     }
     
     private func stopRecording() {
+        if let startDate {
+            elapsedSeconds = max(0, Int(Date().timeIntervalSince(startDate)))
+        }
         timer?.invalidate()
         timer = nil
         startDate = nil
+        activeRecording = nil
+        UIApplication.shared.isIdleTimerDisabled = false
         // stop any standing reminders
         standReminderTimer?.invalidate()
         standReminderTimer = nil
@@ -597,7 +661,22 @@ struct HRVView: View {
         standReminderTimer = nil
         connectionPhase = manager.isConnected ? .connected : .notConnected
         isProcessing = false
+        activeRecording = nil
+        UIApplication.shared.isIdleTimerDisabled = false
         orthoTester = nil
+    }
+
+    private func updateElapsedTimer() {
+        timer?.invalidate()
+        timer = nil
+        guard isViewVisible, scenePhase == .active,
+              connectionPhase == .recording,
+              let startDate
+        else { return }
+        elapsedSeconds = max(0, Int(Date().timeIntervalSince(startDate)))
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            elapsedSeconds = max(0, Int(Date().timeIntervalSince(startDate)))
+        }
     }
     
     private func stepDuration(_ value: inout Int, up: Bool) {

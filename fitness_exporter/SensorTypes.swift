@@ -34,6 +34,11 @@ public struct ECGSamples: Codable {
     public let samples: [ECGSample]
 }
 
+struct ECGPlotPoint: Equatable {
+    let timestamp: Date
+    let voltage: Int16
+}
+
 // Raw accelerometer sample from Polar SDK
 public struct AccSample: Codable {
     // Timestamp reported by the device (in nanoseconds).

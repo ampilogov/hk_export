@@ -515,7 +515,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
     static let sessionIdentifier =
         "com.artemz.fitness_exporter.background-file-upload.v1"
 
-    typealias Completion = (String?) -> Void
+    typealias Completion = (UploadFileFailure?) -> Void
 
     private let store: BackgroundUploadJobStore?
     private let setupError: String?
@@ -767,7 +767,10 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                 attention(message)
                 completeCallbacks(
                     jobID: jobID,
-                    error: message,
+                    failure: UploadFileFailure(
+                        message: message,
+                        scope: .collection
+                    ),
                     recoveredJob: nil
                 )
                 return
@@ -778,21 +781,36 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
             attention(message)
             completeCallbacks(
                 jobID: jobID,
-                error: message,
+                failure: UploadFileFailure(
+                    message: message,
+                    scope: .collection
+                ),
                 recoveredJob: nil
             )
             return
         }
 
         if let error {
-            failTransfer(job, message: "Client error: \(error.localizedDescription)")
-            return
-        }
-        guard let response = response as? HTTPURLResponse,
-              (200...299).contains(response.statusCode) else {
             failTransfer(
                 job,
-                message: "Server error: \(String(describing: response))"
+                message: "Client error: \(error.localizedDescription)",
+                scope: .collection
+            )
+            return
+        }
+        guard let response = response as? HTTPURLResponse else {
+            failTransfer(
+                job,
+                message: "Server error: \(String(describing: response))",
+                scope: .collection
+            )
+            return
+        }
+        guard (200...299).contains(response.statusCode) else {
+            failTransfer(
+                job,
+                message: "Server error: HTTP \(response.statusCode)",
+                scope: Self.failureScope(forHTTPStatusCode: response.statusCode)
             )
             return
         }
@@ -807,7 +825,11 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                 "persist acceptance: \(error.localizedDescription)"
             ).localizedDescription
             attention(message)
-            completeCallbacks(jobID: job.id, error: message, recoveredJob: job)
+            completeCallbacks(
+                jobID: job.id,
+                failure: UploadFileFailure(message: message, scope: .file),
+                recoveredJob: job
+            )
             return
         }
         finalizeAcceptedJob(accepted)
@@ -848,7 +870,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
             if let bodyURL = try? store.bodyURL(fileName: job.bodyFileName) {
                 try? FileManager.default.removeItem(at: bodyURL)
             }
-            completeCallbacks(jobID: job.id, error: nil, recoveredJob: job)
+            completeCallbacks(jobID: job.id, failure: nil, recoveredJob: job)
         } catch {
             var retained = job
             retained.state = .accepted
@@ -864,13 +886,20 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
             attention(error.localizedDescription)
             completeCallbacks(
                 jobID: job.id,
-                error: error.localizedDescription,
+                failure: UploadFileFailure(
+                    message: error.localizedDescription,
+                    scope: .file
+                ),
                 recoveredJob: job
             )
         }
     }
 
-    private func failTransfer(_ job: BackgroundUploadJob, message: String) {
+    private func failTransfer(
+        _ job: BackgroundUploadJob,
+        message: String,
+        scope: UploadFailureScope
+    ) {
         guard let store else { return }
         var finalMessage = message
         var removedJob = false
@@ -886,9 +915,28 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
         }
         completeCallbacks(
             jobID: job.id,
-            error: finalMessage,
+            failure: UploadFileFailure(
+                message: finalMessage,
+                scope: scope
+            ),
             recoveredJob: job
         )
+    }
+
+    static func failureScope(
+        forHTTPStatusCode statusCode: Int
+    ) -> UploadFailureScope {
+        guard (400...499).contains(statusCode) else { return .collection }
+        switch statusCode {
+        case 401, 403, 404, 408, 429:
+            // Authentication, endpoint configuration, timeout, and throttling
+            // affect the collection rather than the current source file.
+            return .collection
+        default:
+            // Payload/file rejections must remain visible but cannot prevent
+            // later valid recordings from being attempted.
+            return .file
+        }
     }
 
     private func reconcileOutstandingTasks() {
@@ -967,7 +1015,8 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                 } else {
                     failTransfer(
                         job,
-                        message: "Upload staging was interrupted before submission"
+                        message: "Upload staging was interrupted before submission",
+                        scope: .file
                     )
                 }
             case .submitted:
@@ -1004,7 +1053,10 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                         self.attention(message)
                         self.completeCallbacks(
                             jobID: job.id,
-                            error: message,
+                            failure: UploadFileFailure(
+                                message: message,
+                                scope: .file
+                            ),
                             recoveredJob: job
                         )
                     } catch {
@@ -1023,7 +1075,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
 
     private func completeCallbacks(
         jobID: String,
-        error: String?,
+        failure: UploadFileFailure?,
         recoveredJob: BackgroundUploadJob?
     ) {
         let currentCallbacks: [Completion] = stateQueue.sync {
@@ -1034,12 +1086,12 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
            let relativePath = job.immediateRelativePath {
             ImmediateUploadService.shared.handleRecoveredBackgroundResult(
                 relativePath: relativePath,
-                error: error
+                error: failure?.message
             )
             return
         }
         for callback in currentCallbacks {
-            callback(error)
+            callback(failure)
         }
     }
 
@@ -1055,6 +1107,13 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                 content: content,
                 trigger: nil
             )
-        )
+        ) { error in
+            if let error {
+                CustomLogger.log(
+                    "[Upload][Background][Notification][Error] "
+                        + error.localizedDescription
+                )
+            }
+        }
     }
 }

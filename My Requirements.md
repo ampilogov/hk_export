@@ -1,6 +1,6 @@
 # My Requirements
 
-Last updated: September 7, 2026
+Last updated: September 8, 2026
 
 This document tracks improvements to continuous Polar H10 recording. Requirements are kept separate from implementation considerations so that each item can be discussed, implemented, and verified independently.
 
@@ -32,19 +32,13 @@ Completed items are removed from this active tracker instead of accumulating und
 
 Find the causes of crashes or unexpected app termination during long recordings. Preserve as much recorded data as possible and make failures diagnosable after they occur.
 
-**Status:** In progress — observe normal use with retained lightweight diagnostics; no dedicated long-duration test is planned
-
-### R3 — Make large recording collections and uploads efficient
-
-The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
-
-**Status:** In progress — collection-wide retry control and quieter progress logging are next
+**Status:** In progress — implementation complete; observe normal use with retained lightweight diagnostics after the final device pass
 
 ### R4 — Automatically reconnect and resume recording
 
 Use the Polar SDK with one repeatable connection and stream lifecycle. Repeated Stop/Start, disconnect/reconnect, and unrelated upload activity must not leave HR/RR, ECG, or ACC partially stopped. When the Polar H10 disconnects unexpectedly, the app should reconnect automatically and resume every required stream without manual intervention. The resulting data should clearly represent any unavoidable gap.
 
-**Status:** In progress — implementation complete; real-device verification is deferred to one bundled validation pass after the next implementation items
+**Status:** In progress — implementation complete; real-device verification is deferred to the final bundled validation pass
 
 ### R5 — Make notifications actionable without causing noise
 
@@ -52,52 +46,17 @@ Short, self-healing interruptions should not immediately notify the user. Persis
 
 **Status:** In progress — staged alerts are implemented; iPhone and paired-Watch delivery are deferred to the bundled real-device validation pass
 
-### R6 — Add fast, interactive ECG access
-
-Make ECG data easy to inspect without continuously rendering a large graph or creating significant additional battery use. Prefer an RR overview where selecting a timestamp opens a short ECG window around that time.
-
-**Status:** Proposed
-
-### R7 — Address other continuous-recording inefficiencies
-
-Review memory use, disk writes, HealthKit imports, background execution, UI updates, and data durability for any additional problems that become important during long recordings.
-
-**Status:** Proposed
-
-### R8 — Protect cursor and backfill reset controls
-
-Prevent accidental cursor or HealthKit-backfill resets from launching unexpectedly large re-exports or duplicate work. Reset actions must explain their consequences, require confirmation, and refuse to race an active recording, export, or backfill operation.
-
-**Status:** Proposed
-
-### R9 — Keep the rest of the app usable during continuous recording
-
-Allow navigation to other tabs while continuous recording continues. Keep recording state and controls visible, while disabling only operations that genuinely conflict with active recording.
-
-**Status:** Proposed
-
 ## Recommended implementation order
 
-1. **R4 and R5 — Reconnection, recording resume, and failure notification.** Build one connection-health state machine and use it for silent recovery followed by actionable escalation.
-2. **R3 — Storage and upload scalability.** Fix the existing backlog experience, then compact local storage without changing server-visible files or payloads.
-3. **R2 — Passive stability observation.** Keep lightweight diagnostics available and investigate only if an unexpected termination recurs during normal use.
-4. **R6 — ECG inspection.** Build the viewer after the storage format supports efficient time-range reads.
-5. **R8 — Reset safety.** Protect destructive cursor and backfill reset controls before making the rest of the UI available during recording.
-6. **R9 — Recording-time UI usability.** Remove the global tab lock after recording state and conflicting actions are safely app-scoped.
-7. **R7 — Remaining improvements.** Reassess after the earlier work.
+1. **R2, R4, and R5 — Final bundled device validation.** Verify H10 recovery, all three streams, navigation, ECG access, staged notifications, the watchdog, and diagnostic visibility in one pass. Continue passive crash observation during normal use afterward.
 
 ## Status tracker
 
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | In progress | Add a collection-level retry budget and aggregate repetitive upload logs |
 | R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
 | R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
-| R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
-| R7 | Other inefficiencies | Proposed | Reassess after R2–R3 |
-| R8 | Reset-button safety | Proposed | Define confirmation, busy-state, and error-result behavior for both reset controls |
-| R9 | UI during active recording | Proposed | Move recording status to app scope and inventory actions that must remain disabled |
 
 ## Considerations by requirement
 
@@ -107,14 +66,12 @@ Current observations:
 
 - The app reportedly terminates silently after roughly 12 hours of continuous recording. The user normally discovers this only after unlocking the phone. The cause is still unknown until a physical-device run produces MetricKit, interruption-marker, or watchdog evidence.
 - The recording invariant is that every `SensorEvent` delivered by the SDK is written exactly once, in per-stream order, to exactly one adjacent v1 file. The current format cannot recover a packet that never reached the app, and a process crash can still lose the unfinished in-memory window of up to the configured recording duration.
-- The RR graph still assumes ordered timestamps and non-zero plot ranges. Harden it if the captured evidence implicates plotting or if interactive ECG work reuses that path.
 
 Remaining approach:
 
 - Do not schedule dedicated 12-hour or 24-hour soak tests. Observe stability during normal recording use.
 - Keep the existing bounded session journal and MetricKit crash/application-exit payloads. Add no higher-frequency telemetry unless a recurring failure provides a specific question that requires it.
 - If termination recurs, classify it from the retained evidence before adding unfinished-window protection or more instrumentation.
-- Harden plotting against duplicate timestamps, empty data, and constant ranges when the graph path is next changed or if retained evidence implicates it.
 
 Acceptance criteria:
 
@@ -122,34 +79,6 @@ Acceptance criteria:
 - The binary bytes, final filename, and server-visible upload/export contract remain unchanged.
 - Any reduction in the crash-loss window must not materially increase battery drain or create an iCloud/file-synchronization storm.
 - If a termination occurs during normal use, the next launch exposes the retained session marker and any available MetricKit evidence; the independently scheduled watchdog remains the immediate user-facing alert.
-- Graph edge cases are covered by automated tests before the graph path is expanded.
-
-### R3 considerations — Files and uploads
-
-Current observations:
-
-- Each recording window creates a separate `.bin` file.
-- Upload logging magnifies backlog work: each file emits multiple persistent logs, and each log rebuilds and rewrites up to 400 records in `UserDefaults`.
-
-Proposed approach:
-
-- Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
-- Add a collection-level circuit breaker and retry budget. Immediate sending over cellular is required, but a confirmed server/network outage must pause and reschedule the batch instead of retrying every pending file continuously.
-- Aggregate repetitive logs into periodic progress summaries.
-- Any future bundled or resumable transport must remain outside scope unless the server migration and compatibility contract are explicitly approved.
-- Provide an explicit migration/compaction tool for the existing backlog. Never delete originals until the compacted output is verified and the configured retention rule permits deletion.
-
-Acceptance criteria:
-
-- The Upload screen presents useful cached information in under 0.5 seconds with 50,000 indexed recordings.
-- UI rendering does not trigger repeated directory scans or metadata reads.
-- Local compaction can reproduce every original five-minute filename and byte sequence exactly; until compaction is verified and reversible, the original files remain untouched.
-- A collection-wide network failure performs a bounded number of attempts and cannot generate one retry storm per pending file.
-
-Dependencies and decisions:
-
-- Server protocol changes are not part of the current plan. Reversible local archival can be completed while preserving the existing server contract.
-- Retention policy must remain conservative by default: keep source data unless deletion has been explicitly enabled.
 
 ### R4 considerations — Auto reconnect and recording resume
 
@@ -168,7 +97,6 @@ Acceptance criteria:
 - Repeating Stop/Start and disconnect/reconnect cycles cannot leave ECG or ACC absent while HR continues, and upload work cannot mutate Bluetooth stream state.
 - Empty SDK packets remain in the source recording but do not count as healthy RR, ECG, or ACC data.
 - The UI reports `recording` only after RR, ECG, and ACC have each delivered data for the current connection generation.
-- Reconnection behavior is covered with deterministic simulated-device tests.
 
 ### R5 considerations — Notifications
 
@@ -185,7 +113,6 @@ Acceptance criteria:
 - A disconnect shorter than 10 seconds produces no notification.
 - A persistent interruption produces one notification at each configured escalation level, not one per stream or callback.
 - Recovery cancels all obsolete pending alerts.
-- Failure to schedule an interruption alert is shown in the app with the failed notification identifier and underlying error.
 - A simulated dead process results in the pre-scheduled watchdog notification.
 - A healthy normal-use recording produces no false watchdog alert, while a deliberate notification sanity check produces one alert within the documented grace period.
 - Watch delivery is verified with the iPhone locked and the paired Apple Watch unlocked; failure to mirror must remain visible on the iPhone.
@@ -196,86 +123,19 @@ Evidence references:
 - [Apple Live Activity stale dates](https://developer.apple.com/documentation/activitykit/activitycontent/staledate)
 - [Apple Watch notification routing](https://support.apple.com/en-gb/108369)
 
-### R6 considerations — Interactive ECG
+## Final bundled device pass
 
-Current observations:
+Run this once after installing the completed build:
 
-- The existing UI plots only RR intervals.
-- Existing recording files contain ECG voltages, but the current HealthKit-oriented decoder deliberately skips ECG and ACC payloads.
-- Publishing and rendering the full ECG continuously would waste CPU and memory without improving the normal recording screen.
+1. Start continuous recording and confirm RR, ECG, and ACC become current. Lock the phone and wait for at least one five-minute file boundary.
+2. While recording, visit Upload, Logs, and Settings. Confirm the recording strip remains visible, returns to the same session, and destructive reset/backfill controls are disabled.
+3. Tap an RR point and confirm a ten-second ECG view loads and pans smoothly without interrupting recording.
+4. Briefly interrupt the H10 connection for less than ten seconds. Confirm no notification is delivered and all three streams recover automatically.
+5. Interrupt it for longer than ten seconds and confirm the reconnecting notification. Leave it interrupted through sixty seconds and confirm the time-sensitive attention notification reaches the expected iPhone/Watch destination.
+6. Recover once more, then stop normally. Confirm the latest logs contain a consistent session ID across `Started`, `File`, any `Interrupted`/`Recovered` events, upload outcome, and `Finalized`.
+7. In a separate short run, force-terminate the app and wait for the configurable watchdog. Relaunch and confirm the unexpected-termination message identifies the last completed file. Do not perform a dedicated long soak.
 
-Proposed approach:
-
-- Keep RR as the lightweight overview.
-- Make an RR point or timestamp selectable and open an ECG detail centered on approximately five seconds before and after it.
-- Decode only the requested time range on a background queue.
-- Draw one fixed-size viewport using `Canvas`, with min/max envelope downsampling, drag-to-pan, and optional pinch zoom. Do not create a SwiftUI view per ECG sample.
-- Maintain only a small live ECG ring buffer while the detail view is visible.
-- Add a range reader compatible with existing version-1 files.
-- Build device-clock-to-wall-clock alignment and byte-range indexes as sidecar metadata so existing v1 files remain unchanged. Consider a new recording format only as a separately approved migration if sidecars prove insufficient.
-
-Acceptance criteria:
-
-- Selecting an RR timestamp opens its ten-second ECG neighborhood quickly without loading the complete recording.
-- Panning and zooming remain responsive on long sessions.
-- Keeping the ECG detail closed adds no continuous rendering workload.
-- Existing recordings remain readable.
-
-### R7 considerations — Other continuous-recording inefficiencies
-
-Areas to include in ongoing review:
-
-- Serialize sensor ownership and mutable recording state to remove race conditions.
-- Keep all queues and buffers bounded.
-- Batch HealthKit authorization and imports rather than initializing the complete flow for every small file.
-- Make underlying background exporter and upload work cancellable when its task expires.
-- Record only telemetry that directly answers an active reliability question; do not persist high-frequency per-packet details.
-- Exercise 12-hour and 24-hour physical-device soak tests after each major recording-engine change.
-
-Acceptance criteria:
-
-- A 24-hour soak test shows stable memory and bounded queues.
-- No synchronous disk or network work blocks the main thread.
-- Background expiration, disk-full, corrupt-tail, permission-loss, and network-loss cases fail safely without silently losing the whole session.
-
-### R8 considerations — Reset-button safety
-
-Current observations:
-
-- “Reset background refresh cursors” immediately deletes all incremental-export cursor values with one tap. A later export can consequently begin from the default 2001 start date.
-- “Reset backfill memory” immediately forgets which SensorBag files were imported. It is disabled only for a backfill started from the current Settings view and does not protect against other active work.
-- A lock can reject some cursor resets internally, but the button does not explain the failure or confirm what was changed.
-
-Proposed behavior:
-
-- Put both reset controls in a visually destructive section and require a confirmation that names the resulting reprocessing work.
-- Refuse reset while the corresponding exporter/backfill is active or while continuous recording is active; return and display an explicit result rather than relying only on a log.
-- Report how many cursor or index entries were removed. Do not automatically start the resulting re-export.
-
-Acceptance criteria:
-
-- Neither reset can occur with one accidental tap.
-- A busy-state race cannot partially reset state.
-- Success and failure are visible, including the number of removed entries.
-
-### R9 considerations — UI during active recording
-
-Current observations:
-
-- The root tab view currently redirects every attempted tab change back to HRV while `isProcessing` is true and blurs other tabs.
-- This prevents viewing logs, upload state, and safe settings during a long recording.
-
-Proposed behavior:
-
-- Move continuous-recording status to app-scoped state rather than using a global UI lock.
-- Permit normal tab navigation while recording and show a persistent recording indicator with elapsed time and a path back to Stop.
-- Disable or guard only actions that conflict with recording, such as destructive state resets or starting a second recording/export with unsafe resource overlap.
-
-Acceptance criteria:
-
-- Switching tabs does not stop, restart, duplicate, or interrupt sensor ingestion.
-- Logs and upload status remain readable during recording.
-- Returning to HRV shows the same session and controls.
+If anything fails, capture the latest in-app log pages before retrying. The retained diagnostics intentionally contain lifecycle transitions, file/upload outcomes, recovery gaps, notification errors, and MetricKit reports only—no per-packet or battery telemetry.
 
 ## Decision log
 
@@ -293,3 +153,6 @@ Record decisions here as requirements are refined.
 | 2026-09-06 | R8/R9 | Capture reset-button protection and recording-time tab navigation as separate work | These concerns should not be forgotten or silently expand the current crash slice |
 | 2026-09-06 | R4 | Treat repeatable Polar SDK stream lifecycle as a prerequisite for reconnect/resume | Current dual connection ownership, terminal publisher teardown, and sticky stream-start flags can explain HR continuing while ECG or ACC fails after repeated lifecycle operations |
 | 2026-09-06 | R2 | Use passive observation instead of dedicated long-duration soak testing | Existing bounded MetricKit and session-journal evidence is sufficient unless a failure recurs; manual effort should focus on notification sanity checks |
+| 2026-09-08 | R2–R7 | Defer physical-device testing until all remaining implementation work is complete | One diagnostic-friendly bundled pass minimizes scarce device-testing time and avoids repeated setup churn |
+| 2026-09-08 | R2/R7 | Keep device diagnostics limited to lifecycle transitions, durable-file/upload outcomes, recovery gaps, notification outcomes, and explicit failures | These events can distinguish the likely device-only failure modes without packet-level logs, battery sampling, or continuous telemetry |
+| 2026-09-08 | R3 | Keep every existing recording file, binary format, filename, and server contract unchanged; do not add storage compaction | Large-collection performance is addressed through non-destructive indexing, caching, and durable upload queues, while deterministic HealthKit sync identifiers preserve idempotent writes |

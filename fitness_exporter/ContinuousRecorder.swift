@@ -86,7 +86,6 @@ final class ContinuousRecorder: ObservableObject {
         var lastRR: Date?
         var lastECG: Date?
         var lastACC: Date?
-        var uiPublishScheduled = false
     }
 
     private struct IngestionSnapshot {
@@ -97,7 +96,6 @@ final class ContinuousRecorder: ObservableObject {
     }
 
     private static let liveActivityMinimumUpdateInterval: TimeInterval = 30
-    private static let uiTimestampMinimumUpdateInterval: TimeInterval = 1
     private static let watchdogRefreshInterval: TimeInterval = 60
     private static let healthyStreamMaximumAge: TimeInterval = 15
     private static let staleStreamMaximumAge: TimeInterval = 10
@@ -133,7 +131,6 @@ final class ContinuousRecorder: ObservableObject {
     private var healthKitImports: [PendingHealthKitImport] = []
     private var healthKitImportInFlight = false
     private var ingestionState = IngestionState()
-    private var uiPublishWorkItem: DispatchWorkItem?
     private var discardBufferedEventsAtNextWindowStart = false
     private var lastWatchdogRefreshAt: Date?
     private var lastWatchdogRR: Date?
@@ -201,7 +198,7 @@ final class ContinuousRecorder: ObservableObject {
         guard isRunning else { return }
         guard let recordingID = activeRecordingID else { return }
         manager.drainPendingSensorEvents()
-        let finalSnapshot = drainIngestion(cancelScheduledPublish: true)
+        let finalSnapshot = drainIngestion()
         closeInterruptionForStop(at: Date())
         subscriptions.removeAll()
         if let finalSnapshot {
@@ -228,6 +225,31 @@ final class ContinuousRecorder: ObservableObject {
                 sessionID: sessionID)
         }
         attention = nil
+    }
+
+    /// Load a short ECG neighborhood without touching the active writer or
+    /// changing the on-disk recording format. The unfinished bag is copied on
+    /// the ingestion queue; file discovery and decoding stay off that queue.
+    func loadECGWindow(
+        centeredAt center: Date,
+        halfWidth: TimeInterval = 30,
+        completion: @escaping (Result<[ECGPlotPoint], Error>) -> Void
+    ) {
+        ingestionQueue.async { [weak self] in
+            let liveEvents = self?.recorder.snapshot() ?? []
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result {
+                    try SensorBagPersistence.loadECGWindow(
+                        centeredAt: center,
+                        halfWidth: halfWidth,
+                        liveEvents: liveEvents
+                    )
+                }
+                DispatchQueue.main.async {
+                    completion(result)
+                }
+            }
+        }
     }
 
     func retryFailedWrites() {
@@ -261,6 +283,11 @@ final class ContinuousRecorder: ObservableObject {
         interruptionNotifier.cancelAll()
         let recordingID = UUID()
         activeRecordingID = recordingID
+        CustomLogger.log(
+            "[Continuous][Started] session=\(recordingID.uuidString) "
+                + "window=\(durationSeconds)s interval=\(intervalSeconds)s "
+                + "watchdog=\(Int(watchdog.delay))s"
+        )
         recorder.reset()
         resetIngestion(for: recordingID)
         discardBufferedEventsAtNextWindowStart = false
@@ -297,6 +324,9 @@ final class ContinuousRecorder: ObservableObject {
     private func checkStaleness() {
         guard isRunning, let captureStart else { return }
         let now = Date()
+        if let snapshot = drainIngestion() {
+            applyIngestionSnapshot(snapshot)
+        }
         guard now.timeIntervalSince(captureStart) >= Self.staleStreamMaximumAge else {
             return
         }
@@ -347,6 +377,9 @@ final class ContinuousRecorder: ObservableObject {
                 at: now
             )
         case .streamReady:
+            if let snapshot = drainIngestion() {
+                applyIngestionSnapshot(snapshot)
+            }
             resolveInterruptionIfHealthy(at: now)
         case .connecting, .connected:
             break
@@ -487,8 +520,6 @@ final class ContinuousRecorder: ObservableObject {
 
     private func resetIngestion(for recordingID: UUID) {
         ingestionQueue.sync {
-            uiPublishWorkItem?.cancel()
-            uiPublishWorkItem = nil
             ingestionState = IngestionState(recordingID: recordingID)
         }
     }
@@ -500,50 +531,22 @@ final class ContinuousRecorder: ObservableObject {
         // serial ingestion queue, preserving the publisher's packet order.
         recorder.record(event)
 
-        var shouldPublish = false
         switch event.data {
         case .hrSamples:
             if event.recordingHealthStream == .hr {
                 ingestionState.lastRR = event.timestamp
-                shouldPublish = true
             }
         case .ecgSamples:
             if event.recordingHealthStream == .ecg {
                 ingestionState.lastECG = event.timestamp
-                shouldPublish = true
             }
         case .accSamples:
             if event.recordingHealthStream == .acc {
                 ingestionState.lastACC = event.timestamp
-                shouldPublish = true
             }
         default:
             break
         }
-
-        if shouldPublish {
-            scheduleIngestionPublishIfNeeded()
-        }
-    }
-
-    private func scheduleIngestionPublishIfNeeded() {
-        guard !ingestionState.uiPublishScheduled else { return }
-        ingestionState.uiPublishScheduled = true
-
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.ingestionState.uiPublishScheduled = false
-            self.uiPublishWorkItem = nil
-            guard let snapshot = self.makeIngestionSnapshot() else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.applyIngestionSnapshot(snapshot)
-            }
-        }
-        uiPublishWorkItem = workItem
-        ingestionQueue.asyncAfter(
-            deadline: .now() + Self.uiTimestampMinimumUpdateInterval,
-            execute: workItem
-        )
     }
 
     private func makeIngestionSnapshot() -> IngestionSnapshot? {
@@ -557,13 +560,8 @@ final class ContinuousRecorder: ObservableObject {
     }
 
     @discardableResult
-    private func drainIngestion(cancelScheduledPublish: Bool = false) -> IngestionSnapshot? {
+    private func drainIngestion() -> IngestionSnapshot? {
         ingestionQueue.sync {
-            if cancelScheduledPublish {
-                uiPublishWorkItem?.cancel()
-                uiPublishWorkItem = nil
-                ingestionState.uiPublishScheduled = false
-            }
             return makeIngestionSnapshot()
         }
     }
@@ -737,6 +735,13 @@ final class ContinuousRecorder: ObservableObject {
         case .success(let persisted):
             let fileURL = persisted.fileURL
             watchdog.checkpoint(sessionID: batch.recordingID, fileURL: fileURL)
+            let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                .map(String.init) ?? "unknown"
+            CustomLogger.log(
+                "[Continuous][File] session=\(batch.recordingID.uuidString) "
+                    + "name=\(fileURL.lastPathComponent) bytes=\(fileSize) "
+                    + "upload_queued=\(persisted.immediateUploadQueueError == nil)"
+            )
             if let queueError = persisted.immediateUploadQueueError {
                 notify(
                     title: "Recording upload queue failed",
@@ -800,7 +805,7 @@ final class ContinuousRecorder: ObservableObject {
     private func stopAfterPersistenceFailure(recordingID: UUID) -> Bool {
         guard activeRecordingID == recordingID, isRunning else { return false }
         manager.drainPendingSensorEvents()
-        _ = drainIngestion(cancelScheduledPublish: true)
+        _ = drainIngestion()
         subscriptions.removeAll()
         isRunning = false
         isWriteWindow = false
@@ -833,6 +838,9 @@ final class ContinuousRecorder: ObservableObject {
         sessionsAwaitingFinalization.remove(recordingID)
         RecordingSessionJournal.end(sessionID: recordingID)
         watchdog.stop(sessionID: recordingID, clearJournal: false)
+        CustomLogger.log(
+            "[Continuous][Finalized] session=\(recordingID.uuidString)"
+        )
     }
 
     private func beginFileFinalizationTask() -> BackgroundTaskToken {
@@ -893,7 +901,22 @@ final class ContinuousRecorder: ObservableObject {
                 identifier: identifier,
                 content: content,
                 trigger: nil
-            ))
+            )
+        ) { [weak self] error in
+            guard let error else { return }
+            let message =
+                "Could not deliver \(identifier): \(error.localizedDescription)"
+            CustomLogger.log("[Continuous][Notification][Error] \(message)")
+            DispatchQueue.main.async {
+                guard let self, self.attention == nil else { return }
+                self.attention = RecordingAttention(
+                    title: "Recording alert failed",
+                    message: message,
+                    offersWriteRetry: false,
+                    endedRecording: false
+                )
+            }
+        }
     }
 
     // MARK: - Live Activity

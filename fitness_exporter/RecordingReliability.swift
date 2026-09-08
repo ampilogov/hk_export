@@ -102,10 +102,15 @@ enum RecordingSessionJournal {
 final class RecordingWatchdog {
     static let notificationIdentifier = "ContinuousRecording.Watchdog"
 
-    private let center = UNUserNotificationCenter.current()
+    private let center: RecordingNotificationScheduling
     private var activeSessionID: UUID?
     private var generation = 0
     private var notificationOperation: Task<Void, Never>?
+    private var warning: ((String) -> Void)?
+
+    init(center: RecordingNotificationScheduling = UNUserNotificationCenter.current()) {
+        self.center = center
+    }
 
     var delay: TimeInterval {
         let configured = UserDefaults.standard.integer(
@@ -119,12 +124,13 @@ final class RecordingWatchdog {
         warning: @escaping (String) -> Void
     ) {
         activeSessionID = sessionID
+        self.warning = warning
         RecordingSessionJournal.begin(sessionID: sessionID, at: startedAt)
         schedule(sessionID: sessionID)
 
         Task { [weak self] in
             guard let self else { return }
-            let settings = await center.notificationSettings()
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
             await MainActor.run {
                 guard self.activeSessionID == sessionID else { return }
                 switch settings.authorizationStatus {
@@ -160,6 +166,7 @@ final class RecordingWatchdog {
     func stop(sessionID: UUID, clearJournal: Bool) {
         guard activeSessionID == sessionID else { return }
         activeSessionID = nil
+        warning = nil
         generation += 1
         if clearJournal {
             RecordingSessionJournal.end(sessionID: sessionID)
@@ -224,9 +231,17 @@ final class RecordingWatchdog {
                 watchdog.center.removeDeliveredNotifications(
                     withIdentifiers: [Self.notificationIdentifier])
             } catch {
-                CustomLogger.log(
-                    "[Continuous][Watchdog] Could not schedule alert: \(error.localizedDescription)"
-                )
+                let message =
+                    "Could not schedule \(Self.notificationIdentifier): "
+                    + error.localizedDescription
+                CustomLogger.log("[Continuous][Watchdog] \(message)")
+                guard
+                    watchdog.activeSessionID == sessionID,
+                    watchdog.generation == scheduledGeneration
+                else {
+                    return
+                }
+                watchdog.warning?(message)
             }
         }
     }

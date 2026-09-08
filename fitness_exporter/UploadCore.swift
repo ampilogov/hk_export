@@ -30,9 +30,161 @@ enum UploadCoreError: Error, CustomStringConvertible, LocalizedError {
     var errorDescription: String? { description }
 }
 
+enum UploadFailureScope: Equatable {
+    /// This source file or its retained durable job needs attention, but later
+    /// files may still upload successfully.
+    case file
+    /// The transport, server, configuration, or shared upload infrastructure
+    /// is unavailable, so probing every file would create a retry storm.
+    case collection
+}
+
+struct UploadFileFailure: Equatable {
+    let message: String
+    let scope: UploadFailureScope
+}
+
 private final class UploadQueueState {
     var nextIndex = 0
     var firstError: String?
+    var clearedPersistedCooldown = false
+}
+
+/// Tracks one user/background backlog run across every configured directory.
+/// A success resets the consecutive-failure streak, while deferred iCloud
+/// files remain pending without being mistaken for a server outage.
+final class UploadBatchState {
+    static let defaultConsecutiveFailureLimit = 2
+
+    private(set) var firstError: String?
+    private(set) var succeededCount = 0
+    private(set) var failedCount = 0
+    private(set) var deferredCount = 0
+    private(set) var consecutiveFailureCount = 0
+
+    let consecutiveFailureLimit: Int
+
+    init(
+        consecutiveFailureLimit: Int = UploadBatchState.defaultConsecutiveFailureLimit
+    ) {
+        precondition(consecutiveFailureLimit > 0)
+        self.consecutiveFailureLimit = consecutiveFailureLimit
+    }
+
+    var isCircuitOpen: Bool {
+        consecutiveFailureCount >= consecutiveFailureLimit
+    }
+
+    var processedCount: Int {
+        succeededCount + failedCount + deferredCount
+    }
+
+    func recordSuccess() {
+        succeededCount += 1
+        consecutiveFailureCount = 0
+    }
+
+    @discardableResult
+    func recordFailure(
+        _ message: String,
+        consumesOutageBudget: Bool = true
+    ) -> Bool {
+        firstError = firstError ?? message
+        failedCount += 1
+        if consumesOutageBudget {
+            consecutiveFailureCount += 1
+        }
+        return isCircuitOpen
+    }
+
+    func recordDeferred(_ message: String) {
+        firstError = firstError ?? message
+        deferredCount += 1
+    }
+}
+
+final class UploadCollectionRetryStore {
+    struct Entry: Codable, Equatable {
+        let failureLevel: Int
+        let nextAttemptAt: Date
+    }
+
+    static let shared = UploadCollectionRetryStore()
+    static let initialDelay: TimeInterval = 60
+    static let maximumDelay: TimeInterval = 60 * 60
+
+    private static let defaultsKey = "UploadCollectionRetryCooldowns.v1"
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func nextAttemptAt(
+        server: String,
+        sender: String,
+        now: Date = Date()
+    ) -> Date? {
+        lock.withLock {
+            guard let entry = load()[collectionKey(server: server, sender: sender)],
+                  entry.nextAttemptAt > now else {
+                return nil
+            }
+            return entry.nextAttemptAt
+        }
+    }
+
+    @discardableResult
+    func recordCircuitOpen(
+        server: String,
+        sender: String,
+        now: Date = Date()
+    ) -> Entry {
+        lock.withLock {
+            var entries = load()
+            let key = collectionKey(server: server, sender: sender)
+            let failureLevel = min((entries[key]?.failureLevel ?? 0) + 1, 7)
+            let multiplier = pow(2.0, Double(failureLevel - 1))
+            let delay = min(Self.initialDelay * multiplier, Self.maximumDelay)
+            let entry = Entry(
+                failureLevel: failureLevel,
+                nextAttemptAt: now.addingTimeInterval(delay)
+            )
+            entries[key] = entry
+            persist(entries)
+            return entry
+        }
+    }
+
+    func clear(server: String, sender: String) {
+        lock.withLock {
+            var entries = load()
+            let key = collectionKey(server: server, sender: sender)
+            guard entries.removeValue(forKey: key) != nil else { return }
+            persist(entries)
+        }
+    }
+
+    private func load() -> [String: Entry] {
+        guard let data = defaults.data(forKey: Self.defaultsKey),
+              let entries = try? JSONDecoder().decode(
+                  [String: Entry].self,
+                  from: data
+              ) else {
+            return [:]
+        }
+        return entries
+    }
+
+    private func persist(_ entries: [String: Entry]) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        defaults.set(data, forKey: Self.defaultsKey)
+    }
+
+    private func collectionKey(server: String, sender: String) -> String {
+        "\(server.utf8.count):\(server)\(sender.utf8.count):\(sender)"
+    }
 }
 
 struct UploadDirectoryInventory {
@@ -414,7 +566,7 @@ final class UploadSingleFlightCoordinator {
 final class UploadFileCoordinator {
     static let shared = UploadFileCoordinator()
 
-    typealias Completion = (String?) -> Void
+    typealias Completion = (UploadFileFailure?) -> Void
     typealias Operation = (@escaping Completion) -> Void
 
     private struct Job {
@@ -498,7 +650,7 @@ final class UploadFileCoordinator {
         }
     }
 
-    private func finish(jobID: UUID, result: String?) {
+    private func finish(jobID: UUID, result: UploadFileFailure?) {
         stateQueue.async { [self] in
             guard let completed = activeJob, completed.id == jobID else { return }
             activeJob = nil
@@ -784,10 +936,26 @@ enum DirectoryUploader {
         stopOnError: Bool,
         priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken?,
+        batchState: UploadBatchState? = nil,
         completion: @escaping (String?) -> Void
     ) {
         guard cancellationToken?.isCancelled != true else {
             return completion("Upload cancelled")
+        }
+        if priority == .background, batchState == nil,
+           let nextAttemptAt = UploadCollectionRetryStore.shared.nextAttemptAt(
+               server: server,
+               sender: sender
+           ) {
+            let seconds = max(
+                1,
+                Int(nextAttemptAt.timeIntervalSinceNow.rounded(.up))
+            )
+            let message =
+                "Backlog upload is cooling down after a server or transport failure; "
+                + "retry after approximately \(seconds) second(s)."
+            CustomLogger.log("[Upload][Batch][Deferred] \(message)")
+            return completion(message)
         }
         guard let baseURL = UploadHelper.resolveURL(from: dir.bookmark) else {
             return completion(UploadCoreError.invalidBookmark.description)
@@ -834,6 +1002,7 @@ enum DirectoryUploader {
             stopOnError: stopOnError,
             priority: priority,
             cancellationToken: cancellationToken,
+            batchState: batchState ?? UploadBatchState(),
             completion: finish
         )
     }
@@ -848,13 +1017,36 @@ enum DirectoryUploader {
         stopOnError: Bool,
         priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken?,
+        batchState: UploadBatchState,
         completion: @escaping (String?) -> Void
     ) {
         let state = UploadQueueState()
+        let startedProcessedCount = batchState.processedCount
+        let startedSucceededCount = batchState.succeededCount
+        let startedFailedCount = batchState.failedCount
+        let startedDeferredCount = batchState.deferredCount
+        CustomLogger.log(
+            "[Upload][Batch][Start] dir=\(dirName) pending=\(files.count)"
+        )
+
+        @Sendable func finish(_ error: String?) {
+            let processed = batchState.processedCount - startedProcessedCount
+            CustomLogger.log(
+                "[Upload][Batch][Finish] dir=\(dirName) processed=\(processed)/\(files.count) "
+                    + "succeeded=\(batchState.succeededCount - startedSucceededCount) "
+                    + "failed=\(batchState.failedCount - startedFailedCount) "
+                    + "deferred=\(batchState.deferredCount - startedDeferredCount)"
+            )
+            completion(error)
+        }
 
         func processNext() {
             guard cancellationToken?.isCancelled != true else {
-                completion("Upload cancelled")
+                finish("Upload cancelled")
+                return
+            }
+            guard !batchState.isCircuitOpen else {
+                finish(batchState.firstError)
                 return
             }
             while state.nextIndex < files.count {
@@ -868,9 +1060,7 @@ enum DirectoryUploader {
                     let message =
                         "Deferred \(file.lastPathComponent): iCloud file is not locally available"
                     state.firstError = state.firstError ?? message
-                    CustomLogger.log(
-                        "[Upload][Skip] dir=\(dirName) file=\(file.lastPathComponent) reason=iCloud file not locally available"
-                    )
+                    batchState.recordDeferred(message)
                     continue
                 }
 
@@ -882,18 +1072,66 @@ enum DirectoryUploader {
                     server: server,
                     sender: sender,
                     priority: priority,
-                    cancellationToken: cancellationToken
-                ) { error in
-                    if let error {
-                        if stopOnError {
-                            completion(error)
+                    cancellationToken: cancellationToken,
+                    logPerFile: false
+                ) { failure in
+                    if let failure {
+                        if cancellationToken?.isCancelled == true {
+                            finish("Upload cancelled")
                             return
                         }
-                        state.firstError = state.firstError ?? error
+                        let contextualError =
+                            "\(file.lastPathComponent): \(failure.message)"
+                        CustomLogger.log(
+                            "[Upload][Batch][Error] dir=\(dirName) "
+                                + "file=\(file.lastPathComponent) err=\(failure.message)"
+                        )
+                        let circuitOpened = batchState.recordFailure(
+                            contextualError,
+                            consumesOutageBudget: failure.scope == .collection
+                        )
+                        if stopOnError {
+                            finish(failure.message)
+                            return
+                        }
+                        state.firstError = state.firstError ?? failure.message
+                        if circuitOpened {
+                            let remaining = files.count - state.nextIndex
+                            let cooldown = UploadCollectionRetryStore.shared
+                                .recordCircuitOpen(server: server, sender: sender)
+                            let seconds = max(
+                                1,
+                                Int(cooldown.nextAttemptAt.timeIntervalSinceNow.rounded(.up))
+                            )
+                            let message =
+                                "Paused backlog upload after "
+                                + "\(batchState.consecutiveFailureCount) consecutive failures; "
+                                + "\(remaining) file(s) remain in \(dirName). "
+                                + "Retry after approximately \(seconds) second(s). "
+                                + "Last error for \(file.lastPathComponent): \(failure.message)"
+                            CustomLogger.log("[Upload][Batch][Paused] \(message)")
+                            finish(message)
+                            return
+                        }
                         DispatchQueue.global(qos: .utility).async {
                             processNext()
                         }
                         return
+                    }
+                    batchState.recordSuccess()
+                    if !state.clearedPersistedCooldown {
+                        state.clearedPersistedCooldown = true
+                        UploadCollectionRetryStore.shared.clear(
+                            server: server,
+                            sender: sender
+                        )
+                    }
+                    if batchState.succeededCount.isMultiple(of: 100) {
+                        CustomLogger.log(
+                            "[Upload][Batch][Progress] succeeded=\(batchState.succeededCount) "
+                                + "failed=\(batchState.failedCount) "
+                                + "deferred=\(batchState.deferredCount)"
+                        )
                     }
                     DispatchQueue.global(qos: .utility).async {
                         processNext()
@@ -902,7 +1140,7 @@ enum DirectoryUploader {
                 return
             }
 
-            completion(state.firstError)
+            finish(state.firstError)
         }
 
         processNext()
@@ -922,7 +1160,8 @@ enum DirectoryUploader {
         cancellationToken: UploadCancellationToken? = nil,
         expectedRecord: UploadDoneRecord? = nil,
         immediateRelativePath: String? = nil,
-        completion: @escaping (String?) -> Void
+        logPerFile: Bool = true,
+        completion: @escaping (UploadFileFailure?) -> Void
     ) {
         // The coordinator key must describe the complete server-visible
         // destination. Length-prefixing keeps user-provided values from
@@ -939,7 +1178,11 @@ enum DirectoryUploader {
             priority: priority,
             operation: { finish in
                 guard cancellationToken?.isCancelled != true else {
-                    return finish(UploadCoreError.cancelled.description)
+                    return finish(
+                        UploadFileFailure(
+                            message: UploadCoreError.cancelled.description,
+                            scope: .collection
+                        ))
                 }
 
                 let hasAccess = baseURL.startAccessingSecurityScopedResource()
@@ -958,7 +1201,7 @@ enum DirectoryUploader {
                         baseURL.stopAccessingSecurityScopedResource()
                     }
                 }
-                func finishOnce(_ error: String?) {
+                func finishOnce(_ failure: UploadFileFailure?) {
                     finishLock.lock()
                     guard !didFinish else {
                         finishLock.unlock()
@@ -967,7 +1210,7 @@ enum DirectoryUploader {
                     didFinish = true
                     finishLock.unlock()
                     releaseAccess()
-                    finish(error)
+                    finish(failure)
                 }
 
                 do {
@@ -985,10 +1228,12 @@ enum DirectoryUploader {
                         )
                     }
                     let byteCount = snapshot.data.count
-                    CustomLogger.log(
-                        "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) "
-                            + "bytes=\(byteCount)"
-                    )
+                    if logPerFile {
+                        CustomLogger.log(
+                            "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) "
+                                + "bytes=\(byteCount)"
+                        )
+                    }
                     try BackgroundFileUploadManager.shared.uploadFile(
                         deduplicationKey: key,
                         server: server,
@@ -1008,19 +1253,24 @@ enum DirectoryUploader {
                                 fileURL: file
                             )
                         },
-                        completion: { error in
-                            if let error {
-                                CustomLogger.log(
-                                    "[Upload][Error] dir=\(dirName) "
-                                        + "file=\(file.lastPathComponent) err=\(error)"
-                                )
-                                return finishOnce(error)
+                        completion: { failure in
+                            if let failure {
+                                if logPerFile {
+                                    CustomLogger.log(
+                                        "[Upload][Error] dir=\(dirName) "
+                                            + "file=\(file.lastPathComponent) "
+                                            + "err=\(failure.message)"
+                                    )
+                                }
+                                return finishOnce(failure)
                             }
-                            CustomLogger.log(
-                                "[Upload][Success] dir=\(dirName) "
-                                    + "file=\(file.lastPathComponent) "
-                                    + "bytes=\(byteCount)"
-                            )
+                            if logPerFile {
+                                CustomLogger.log(
+                                    "[Upload][Success] dir=\(dirName) "
+                                        + "file=\(file.lastPathComponent) "
+                                        + "bytes=\(byteCount)"
+                                )
+                            }
                             finishOnce(nil)
                         }
                     )
@@ -1028,14 +1278,45 @@ enum DirectoryUploader {
                 } catch {
                     releaseAccess()
                     let message = error.localizedDescription
-                    CustomLogger.log(
-                        "[Upload][Error] dir=\(dirName) "
-                            + "file=\(file.lastPathComponent) err=\(message)"
-                    )
-                    finishOnce(message)
+                    if logPerFile {
+                        CustomLogger.log(
+                            "[Upload][Error] dir=\(dirName) "
+                                + "file=\(file.lastPathComponent) err=\(message)"
+                        )
+                    }
+                    finishOnce(uploadFailure(for: error))
                 }
             },
             completion: completion
+        )
+    }
+
+    static func uploadFailure(for error: Error) -> UploadFileFailure {
+        let scope: UploadFailureScope
+        switch error {
+        case UploadCoreError.fileReadFailed(_),
+             UploadCoreError.completionState(_),
+             BackgroundUploadError.invalidJob(_),
+             BackgroundUploadError.bodyEncoding(_),
+             BackgroundUploadError.transfer(_),
+             BackgroundUploadError.acceptedFinalization(_):
+            scope = .file
+        case UploadCoreError.invalidBookmark,
+             UploadCoreError.directoryListFailed(_),
+             UploadCoreError.network(_),
+             UploadCoreError.cancelled,
+             BackgroundUploadError.invalidConfiguration(_),
+             BackgroundUploadError.persistence(_):
+            scope = .collection
+        default:
+            // Unknown local errors are isolated to the current file. A future
+            // file must not be starved unless the transport explicitly reports
+            // a collection-wide failure.
+            scope = .file
+        }
+        return UploadFileFailure(
+            message: error.localizedDescription,
+            scope: scope
         )
     }
 }
@@ -1160,22 +1441,44 @@ extension DirectoryUploader {
         completion: @escaping (String?) -> Void
     ) {
         let state = UploadQueueState()
+        let batchState = UploadBatchState()
+        if priority == .background,
+           let nextAttemptAt = UploadCollectionRetryStore.shared.nextAttemptAt(
+               server: server,
+               sender: sender
+           ) {
+            let seconds = max(
+                1,
+                Int(nextAttemptAt.timeIntervalSinceNow.rounded(.up))
+            )
+            let message =
+                "Backlog upload is cooling down after a server or transport failure; "
+                + "retry after approximately \(seconds) second(s)."
+            CustomLogger.log("[Upload][Batch][Deferred] \(message)")
+            return completion(message)
+        }
         func loop(_ index: Int) {
             guard cancellationToken?.isCancelled != true else {
                 return completion("Upload cancelled")
             }
-            if index >= dirs.count { return completion(state.firstError) }
+            if index >= dirs.count || batchState.isCircuitOpen {
+                return completion(state.firstError ?? batchState.firstError)
+            }
             uploadAllNow(
                 dir: dirs[index],
                 server: server,
                 sender: sender,
                 stopOnError: stopOnError,
                 priority: priority,
-                cancellationToken: cancellationToken
+                cancellationToken: cancellationToken,
+                batchState: batchState
             ) { error in
                 if let error {
                     if stopOnError { return completion(error) }
                     state.firstError = state.firstError ?? error
+                    if batchState.isCircuitOpen {
+                        return completion(error)
+                    }
                 }
                 loop(index + 1)
             }

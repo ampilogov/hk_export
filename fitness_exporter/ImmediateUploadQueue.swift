@@ -684,11 +684,11 @@ final class ImmediateUploadService {
             priority: .immediate,
             expectedRecord: pending.record,
             immediateRelativePath: pending.relativePath
-        ) { [weak self] error in
+        ) { [weak self] failure in
             guard let self else { return }
             self.workerQueue.async {
-                if let error {
-                    self.recordFailure(pending, message: error)
+                if let failure {
+                    self.recordFailure(pending, message: failure.message)
                     return
                 }
                 do {

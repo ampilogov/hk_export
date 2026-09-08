@@ -243,6 +243,14 @@ final class SensorBagRecorder {
         return current
     }
 
+    /// Return a stable view of the unfinished bag without rotating it.
+    func snapshot() -> [SensorEvent] {
+        stateLock.lock()
+        let events = bag.snapshot
+        stateLock.unlock()
+        return events
+    }
+
     func markHRVProtocolStage(_ stage: HRVStage, at timestamp: Date = Date()) {
         let event = SensorEvent(timestamp: timestamp, data: .hrvStage(stage))
         record(event)

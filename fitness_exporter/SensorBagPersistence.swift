@@ -38,6 +38,20 @@ enum SensorBagPersistence {
     private static let syncVersion = NSNumber(value: 1)
     private static let syncIdentifierRoot = "com.artemz.fitness_exporter.sensorbag"
     private static let workStateLock = NSLock()
+    private static let ecgFileIndexLock = NSLock()
+
+    private struct ECGFileIndexEntry {
+        let url: URL
+        let finalizedAt: TimeInterval
+    }
+
+    private struct ECGFileIndexCache {
+        let directoryPath: String
+        let modificationDate: Date
+        let entries: [ECGFileIndexEntry]
+    }
+
+    private static var ecgFileIndexCache: ECGFileIndexCache?
 
     private struct FileMetadata {
         let size: Int64
@@ -88,6 +102,9 @@ enum SensorBagPersistence {
             let candidate = dir.appendingPathComponent("\(timestamp)\(suffix).bin")
             if !FileManager.default.fileExists(atPath: candidate.path) {
                 try bag.saveBinary(to: candidate)
+                if subdir == Profile.continuous.rawValue {
+                    invalidateECGFileIndex()
+                }
                 return candidate
             }
         }
@@ -177,7 +194,7 @@ enum SensorBagPersistence {
             )
 
             DispatchQueue.main.async {
-                HealthKitManager.requestUnifiedAuthorization(startObservers: false) { success in
+                HealthKitManager.requestWriteAuthorization { success in
                     guard success else {
                         CustomLogger.log("[SensorBag][HK] Authorization failed for \(fileURL.lastPathComponent)")
                         finish(.failed("HealthKit authorization failed"))
@@ -417,7 +434,7 @@ enum SensorBagPersistence {
             return
         }
         let store = HKHealthStore()
-        HealthKitManager.requestUnifiedAuthorization(startObservers: false) { success in
+        HealthKitManager.requestWriteAuthorization { success in
             guard success else {
                 completion?(.failed("HealthKit authorization failed"))
                 return
@@ -445,7 +462,7 @@ enum SensorBagPersistence {
             return
         }
         let store = HKHealthStore()
-        HealthKitManager.requestUnifiedAuthorization(startObservers: false) { success in
+        HealthKitManager.requestWriteAuthorization { success in
             guard success else {
                 completion?(.failed("HealthKit authorization failed"))
                 return
@@ -1305,6 +1322,7 @@ enum SensorBagPersistence {
         case unsupportedEventType(UInt32)
         case truncatedData
         case invalidLength
+        case invalidECGTimestampRange
 
         var errorDescription: String? {
             switch self {
@@ -1316,6 +1334,8 @@ enum SensorBagPersistence {
                 return "Truncated sensor bag data"
             case .invalidLength:
                 return "Invalid sensor bag field length"
+            case .invalidECGTimestampRange:
+                return "Invalid ECG timestamp range"
             }
         }
     }
@@ -1329,6 +1349,10 @@ enum SensorBagPersistence {
 
         mutating func readInt32() throws -> Int32 {
             Int32(bitPattern: try readUInt32())
+        }
+
+        mutating func readInt16() throws -> Int16 {
+            Int16(bitPattern: try readInteger())
         }
 
         mutating func readDouble() throws -> Double {
@@ -1365,6 +1389,260 @@ enum SensorBagPersistence {
             offset += size
             return T(littleEndian: value)
         }
+    }
+
+    static func loadECGWindow(
+        centeredAt center: Date,
+        halfWidth: TimeInterval,
+        liveEvents: [SensorEvent] = []
+    ) throws -> [ECGPlotPoint] {
+        let range = center.addingTimeInterval(-halfWidth)...center.addingTimeInterval(halfWidth)
+        let livePoints = ecgPoints(from: liveEvents, in: range)
+        var filePoints: [ECGPlotPoint] = []
+
+        let liveCoversRange =
+            (livePoints.first?.timestamp ?? .distantFuture) <= range.lowerBound
+            && (livePoints.last?.timestamp ?? .distantPast) >= range.upperBound
+        if !liveCoversRange {
+            let directory = documentsDirectory().appendingPathComponent(
+                Profile.continuous.rawValue,
+                isDirectory: true
+            )
+            for entry in try candidateECGFiles(in: directory, centeredAt: center) {
+                let snapshot = try readStableFile(fileURL: entry.url)
+                do {
+                    filePoints.append(
+                        contentsOf: try decodeECGPoints(from: snapshot.data, in: range)
+                    )
+                } catch {
+                    throw NSError(
+                        domain: "SensorBagPersistence",
+                        code: 10,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Can't read ECG from \(entry.url.lastPathComponent): "
+                                + error.localizedDescription
+                        ]
+                    )
+                }
+            }
+        }
+
+        if let firstLiveTimestamp = livePoints.first?.timestamp {
+            filePoints.removeAll { $0.timestamp >= firstLiveTimestamp }
+        }
+        return (filePoints + livePoints).sorted { $0.timestamp < $1.timestamp }
+    }
+
+    static func decodeECGPoints(
+        from data: Data,
+        in range: ClosedRange<Date>
+    ) throws -> [ECGPlotPoint] {
+        var reader = BinaryReader(data: data)
+        let version = try reader.readUInt32()
+        guard version == 0 || version == 1 else {
+            throw SensorBagDecodeError.unsupportedVersion(version)
+        }
+        let eventCount = Int(try reader.readUInt32())
+        var points: [ECGPlotPoint] = []
+
+        for _ in 0..<eventCount {
+            let receivedAt = Date(timeIntervalSince1970: try reader.readDouble())
+            let eventType = try reader.readUInt32()
+            switch eventType {
+            case 1:
+                let sampleCount = Int(try reader.readUInt32())
+                for _ in 0..<sampleCount {
+                    _ = try reader.readInt32()
+                    let rrCount = Int(try reader.readUInt32())
+                    try reader.skip(
+                        byteCount: try safeMultiply(rrCount, MemoryLayout<Double>.size)
+                    )
+                }
+            case 2:
+                let sampleCount = Int(try reader.readUInt32())
+                if version == 0 {
+                    var packet: [(UInt64, Int16)] = []
+                    packet.reserveCapacity(sampleCount)
+                    for _ in 0..<sampleCount {
+                        let timestamp = try reader.readUInt64()
+                        let rawVoltage = try reader.readInt32()
+                        packet.append((timestamp, clampedInt16(rawVoltage)))
+                    }
+                    guard let lastTimestamp = packet.last?.0 else { continue }
+                    for (timestamp, voltage) in packet {
+                        let wallTime = wallTime(
+                            receivedAt: receivedAt,
+                            deviceTimestamp: timestamp,
+                            lastDeviceTimestamp: lastTimestamp
+                        )
+                        if range.contains(wallTime) {
+                            points.append(
+                                ECGPlotPoint(timestamp: wallTime, voltage: voltage)
+                            )
+                        }
+                    }
+                } else {
+                    let firstTimestamp = try reader.readUInt64()
+                    let lastTimestamp = try reader.readUInt64()
+                    guard lastTimestamp >= firstTimestamp else {
+                        throw SensorBagDecodeError.invalidECGTimestampRange
+                    }
+                    let packetDuration = Double(lastTimestamp - firstTimestamp) / 1_000_000_000
+                    for sampleIndex in 0..<sampleCount {
+                        let voltage = try reader.readInt16()
+                        let fraction = sampleCount > 1
+                            ? Double(sampleIndex) / Double(sampleCount - 1)
+                            : 1
+                        let wallTime = receivedAt.addingTimeInterval(
+                            -packetDuration * (1 - fraction)
+                        )
+                        if range.contains(wallTime) {
+                            points.append(
+                                ECGPlotPoint(timestamp: wallTime, voltage: voltage)
+                            )
+                        }
+                    }
+                }
+            case 3:
+                let sampleCount = Int(try reader.readUInt32())
+                if version == 0 {
+                    try reader.skip(
+                        byteCount: try safeMultiply(
+                            sampleCount,
+                            MemoryLayout<UInt64>.size + 3 * MemoryLayout<Int32>.size
+                        )
+                    )
+                } else {
+                    _ = try reader.readUInt64()
+                    _ = try reader.readUInt64()
+                    try reader.skip(
+                        byteCount: try safeMultiply(
+                            sampleCount,
+                            3 * MemoryLayout<Int16>.size
+                        )
+                    )
+                }
+            case 4:
+                _ = try reader.readInt32()
+            case 5, 7:
+                let textLength = Int(try reader.readUInt32())
+                try reader.skip(byteCount: textLength)
+            case 6:
+                try reader.skip(byteCount: 5 * MemoryLayout<Double>.size)
+            default:
+                throw SensorBagDecodeError.unsupportedEventType(eventType)
+            }
+        }
+        return points
+    }
+
+    private static func ecgPoints(
+        from events: [SensorEvent],
+        in range: ClosedRange<Date>
+    ) -> [ECGPlotPoint] {
+        var points: [ECGPlotPoint] = []
+        for event in events {
+            guard case .ecgSamples(let packet) = event.data,
+                  let lastTimestamp = packet.samples.last?.timestamp
+            else { continue }
+            for sample in packet.samples {
+                let timestamp = wallTime(
+                    receivedAt: event.timestamp,
+                    deviceTimestamp: sample.timestamp,
+                    lastDeviceTimestamp: lastTimestamp
+                )
+                if range.contains(timestamp) {
+                    points.append(
+                        ECGPlotPoint(timestamp: timestamp, voltage: sample.voltage)
+                    )
+                }
+            }
+        }
+        return points.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private static func wallTime(
+        receivedAt: Date,
+        deviceTimestamp: UInt64,
+        lastDeviceTimestamp: UInt64
+    ) -> Date {
+        if deviceTimestamp <= lastDeviceTimestamp {
+            return receivedAt.addingTimeInterval(
+                -Double(lastDeviceTimestamp - deviceTimestamp) / 1_000_000_000
+            )
+        }
+        return receivedAt.addingTimeInterval(
+            Double(deviceTimestamp - lastDeviceTimestamp) / 1_000_000_000
+        )
+    }
+
+    private static func clampedInt16(_ value: Int32) -> Int16 {
+        Int16(clamping: value)
+    }
+
+    private static func candidateECGFiles(
+        in directory: URL,
+        centeredAt center: Date
+    ) throws -> [ECGFileIndexEntry] {
+        let entries = try indexedECGFiles(in: directory)
+        guard !entries.isEmpty else { return [] }
+        let target = center.timeIntervalSince1970
+        let insertionIndex = entries.firstIndex { $0.finalizedAt >= target } ?? entries.count
+        let lower = max(0, insertionIndex - 2)
+        let upper = min(entries.count, insertionIndex + 1)
+        return Array(entries[lower..<upper])
+    }
+
+    private static func indexedECGFiles(in directory: URL) throws -> [ECGFileIndexEntry] {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: directory.path) else { return [] }
+        let attributes = try fileManager.attributesOfItem(atPath: directory.path)
+        let modificationDate = attributes[.modificationDate] as? Date ?? .distantPast
+
+        ecgFileIndexLock.lock()
+        if let cache = ecgFileIndexCache,
+           cache.directoryPath == directory.path,
+           cache.modificationDate == modificationDate {
+            ecgFileIndexLock.unlock()
+            return cache.entries
+        }
+        ecgFileIndexLock.unlock()
+
+        let entries = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).compactMap { url -> ECGFileIndexEntry? in
+            guard url.pathExtension.lowercased() == "bin" else { return nil }
+            let timestampText = url.deletingPathExtension().lastPathComponent
+                .split(separator: "-", maxSplits: 1)
+                .first
+            guard let timestampText,
+                  let timestamp = TimeInterval(timestampText)
+            else { return nil }
+            return ECGFileIndexEntry(url: url, finalizedAt: timestamp)
+        }.sorted {
+            if $0.finalizedAt == $1.finalizedAt {
+                return $0.url.lastPathComponent < $1.url.lastPathComponent
+            }
+            return $0.finalizedAt < $1.finalizedAt
+        }
+
+        ecgFileIndexLock.lock()
+        ecgFileIndexCache = ECGFileIndexCache(
+            directoryPath: directory.path,
+            modificationDate: modificationDate,
+            entries: entries
+        )
+        ecgFileIndexLock.unlock()
+        return entries
+    }
+
+    private static func invalidateECGFileIndex() {
+        ecgFileIndexLock.lock()
+        ecgFileIndexCache = nil
+        ecgFileIndexLock.unlock()
     }
 
     private static func decodeEventsFromBinary(_ data: Data) throws -> [SensorEvent] {

@@ -132,6 +132,21 @@ class KeyBasedLock {
 }
 
 final class IncrementalExporter {
+    struct CursorResetResult: Equatable {
+        let removedEntries: Int
+    }
+
+    enum CursorResetError: LocalizedError {
+        case exporterBusy
+
+        var errorDescription: String? {
+            switch self {
+            case .exporterBusy:
+                return "Wait for the active incremental export to finish before resetting cursors"
+            }
+        }
+    }
+
     private static let LOCK = KeyBasedLock(ttl: 60)
 
     private static let EPS: TimeInterval = 600
@@ -139,29 +154,31 @@ final class IncrementalExporter {
         from: DateComponents(year: 2001, month: 1, day: 1))!
     private static let TIME_TO_FINALIZE: TimeInterval = 3 * 24 * 60 * 60
 
-    private static let USER_DEFAULTS_KEY_PREFIX =
+    static let USER_DEFAULTS_KEY_PREFIX =
         "IncrementalExporter_LastExportTime_" + HealthDataExporter.VERSION + "_"
 
     init() {}
 
-    static func resetCursors() {
-        if let token = IncrementalExporter.LOCK.tryLock() {
-            defer { token.unlock() }
-
-            CustomLogger.log("[IE][Warning] Resetting cursors")
-
-            let keys = UserDefaults.standard.dictionaryRepresentation().keys
-
-            for key in keys
-            where key.hasPrefix(IncrementalExporter.USER_DEFAULTS_KEY_PREFIX) {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-
-            UserDefaults.standard.synchronize()
-
-        } else {
-            CustomLogger.log("[IE][Error] Can't aquire lock for reset cursors")
+    @discardableResult
+    static func resetCursors(
+        userDefaults: UserDefaults = .standard
+    ) throws -> CursorResetResult {
+        guard let token = IncrementalExporter.LOCK.tryLock() else {
+            CustomLogger.log("[IE][Error] Can't acquire lock for cursor reset")
+            throw CursorResetError.exporterBusy
         }
+        defer { token.unlock() }
+
+        let keys = userDefaults.dictionaryRepresentation().keys.filter {
+            $0.hasPrefix(IncrementalExporter.USER_DEFAULTS_KEY_PREFIX)
+        }
+        for key in keys {
+            userDefaults.removeObject(forKey: key)
+        }
+        userDefaults.synchronize()
+
+        CustomLogger.log("[IE][Warning] Reset \(keys.count) background export cursors")
+        return CursorResetResult(removedEntries: keys.count)
     }
 
     static func getCursors(
