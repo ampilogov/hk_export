@@ -723,9 +723,18 @@ struct HRVView: View {
 
         private func kickOffSensorBagBackfill() {
             SensorBagPersistence.backfillSavedBagsToHealthKit(onlyPending: true) { summary in
-                CustomLogger.log(
-                    "[HRV][Backfill] total=\(summary.totalFiles) pending=\(summary.pendingFiles) skipped=\(summary.skippedByMemoryFiles) imported=\(summary.importedFiles) unchanged=\(summary.unchangedFiles) failed=\(summary.failedFiles)"
-                )
+                if let errorMessage = summary.errorMessage {
+                    CustomLogger.log("[HRV][Backfill][Error] \(errorMessage)")
+                } else {
+                    let message =
+                        "[HRV][Backfill] total=\(summary.totalFiles) "
+                        + "pending=\(summary.pendingFiles) "
+                        + "skipped=\(summary.skippedByMemoryFiles) "
+                        + "imported=\(summary.importedFiles) "
+                        + "unchanged=\(summary.unchangedFiles) "
+                        + "failed=\(summary.failedFiles)"
+                    CustomLogger.log(message)
+                }
             }
         }
 

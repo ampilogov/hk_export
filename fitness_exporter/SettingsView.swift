@@ -104,8 +104,7 @@ struct SettingsView: View {
                 .font(.footnote)
 
                 Button("Reset backfill memory") {
-                    let removed = SensorBagPersistence.resetBackfillMemory()
-                    hkBackfillStatusText = "Reset backfill memory for \(removed) files."
+                    resetSensorBagBackfillMemory()
                 }
                 .disabled(isHKBackfillRunning)
                 .font(.footnote)
@@ -134,8 +133,45 @@ struct SettingsView: View {
         hkBackfillStatusText = "Scanning saved files..."
         SensorBagPersistence.backfillSavedBagsToHealthKit { summary in
             isHKBackfillRunning = false
-            hkBackfillStatusText =
-                "Total \(summary.totalFiles), pending \(summary.pendingFiles), skipped \(summary.skippedByMemoryFiles), imported \(summary.importedFiles), unchanged \(summary.unchangedFiles), failed \(summary.failedFiles)."
+            if let errorMessage = summary.errorMessage {
+                hkBackfillStatusText = "Backfill failed: \(errorMessage)"
+            } else {
+                hkBackfillStatusText =
+                    "Total \(summary.totalFiles), pending \(summary.pendingFiles), "
+                    + "skipped \(summary.skippedByMemoryFiles), "
+                    + "imported \(summary.importedFiles), "
+                    + "unchanged \(summary.unchangedFiles), "
+                    + "failed \(summary.failedFiles)."
+            }
+        }
+    }
+
+    private func resetSensorBagBackfillMemory() {
+        isHKBackfillRunning = true
+        hkBackfillStatusText = "Resetting backfill memory..."
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result {
+                try SensorBagPersistence.resetBackfillMemory()
+            }
+            DispatchQueue.main.async {
+                isHKBackfillRunning = false
+                switch result {
+                case .success(let resetResult):
+                    hkBackfillStatusText =
+                        "Reset backfill memory for \(resetResult.removedRecords) files."
+                    if let warning = resetResult.warningMessage {
+                        hkBackfillStatusText += " Warning: \(warning)"
+                        CustomLogger.log("[SensorBag][HK] Backfill reset warning: \(warning)")
+                    }
+                case .failure(let error):
+                    hkBackfillStatusText =
+                        "Backfill reset failed: \(error.localizedDescription)"
+                    CustomLogger.log(
+                        "[SensorBag][HK] Backfill reset failed: "
+                            + error.localizedDescription
+                    )
+                }
+            }
         }
     }
 

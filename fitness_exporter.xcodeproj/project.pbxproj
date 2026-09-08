@@ -44,6 +44,7 @@
 		ACF2B0023ABCDEFF00AAA200 /* RecordingReliability.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2B0013ABCDEFF00AAA200 /* RecordingReliability.swift */; };
 		ACF2C0033ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2C0023ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift */; };
 		ACF2D0023ABCDEFF00AAA400 /* UploadCompletionIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */; };
+		ACF2E0023ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -111,6 +112,7 @@
 		ACF2C0013ABCDEFF00AAA300 /* fitness_exporterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = fitness_exporterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACF2C0023ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagCompatibilityTests.swift; sourceTree = "<group>"; };
 		ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadCompletionIndex.swift; sourceTree = "<group>"; };
+		ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagBackfillIndex.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -162,6 +164,7 @@
 		AC6C784B2BAF905500E4A6C3 /* fitness_exporter */ = {
 			isa = PBXGroup;
 			children = (
+				ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */,
 				ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */,
 				ACF2B0013ABCDEFF00AAA200 /* RecordingReliability.swift */,
 				ACDEF2232F7777AA00BEEF01 /* UploadCore.swift */,
@@ -348,6 +351,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ACF2E0023ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift in Sources */,
 				ACF2D0023ABCDEFF00AAA400 /* UploadCompletionIndex.swift in Sources */,
 				ACF2B0023ABCDEFF00AAA200 /* RecordingReliability.swift in Sources */,
 				ACDEF2242F7777AA00BEEF01 /* UploadCore.swift in Sources */,

@@ -38,7 +38,7 @@ Find the causes of crashes or unexpected app termination during long recordings.
 
 The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
 
-**Status:** In progress — the HealthKit JSON processing index is the next scalability bottleneck
+**Status:** In progress — durable immediate upload of each finalized recording package is next
 
 ### R4 — Automatically reconnect and resume recording
 
@@ -91,7 +91,7 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | In progress | Replace the HealthKit JSON processing index with transactional SQLite state |
+| R3 | File and upload efficiency | In progress | Durably queue and immediately upload each finalized five-minute package |
 | R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
 | R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
@@ -108,7 +108,6 @@ Current observations:
 - The app reportedly terminates silently after roughly 12 hours of continuous recording. The user normally discovers this only after unlocking the phone. The cause is still unknown until a physical-device run produces MetricKit, interruption-marker, or watchdog evidence.
 - The recording invariant is that every `SensorEvent` delivered by the SDK is written exactly once, in per-stream order, to exactly one adjacent v1 file. The current format cannot recover a packet that never reached the app, and a process crash can still lose the unfinished in-memory window of up to the configured recording duration.
 - The RR graph still assumes ordered timestamps and non-zero plot ranges. Harden it if the captured evidence implicates plotting or if interactive ECG work reuses that path.
-- Large directory scans and HealthKit index work can still run from the main thread, creating watchdog risk; this belongs to R3.
 
 Remaining approach:
 
@@ -131,7 +130,6 @@ Current observations:
 
 - Each recording window creates a separate `.bin` file.
 - Uploads are serial, and each file is fully loaded, wrapped in a property list, and gzip-compressed in memory.
-- HealthKit backfill reloads and rewrites its complete JSON index after each processed recording, which scales especially poorly for a large backlog.
 - Continuous recording does not currently upload a segment when it is finalized. Upload is triggered only after the user stops recording or later by opportunistic background jobs, which iOS may delay substantially.
 - An unreachable server can perform four attempts per file without a collection-level circuit breaker.
 - Upload logging magnifies backlog work: each file emits multiple persistent logs, and each log rebuilds and rewrites up to 400 records in `UserDefaults`.
@@ -139,7 +137,6 @@ Current observations:
 
 Proposed approach:
 
-- Replace the HealthKit JSON index with transactional SQLite state.
 - Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
 - Extend the single-flight upload coordinator with a durable pending queue while retaining deduplication across UI, recording, and background triggers.
 - Mark every finalized five-minute package pending immediately and begin its transfer while recording continues. Permit both Wi-Fi and cellular, including expensive-network access; do not wait for recording Stop.

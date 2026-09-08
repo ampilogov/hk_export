@@ -776,6 +776,173 @@ final class SensorBagCompatibilityTests: XCTestCase {
             )
         )
     }
+
+    func test_sensorBagBackfillIndex_migratesVerifiedLegacyJSON() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let expected = [
+            "continuous/100.bin": SensorBagBackfillRecord(
+                fileSize: 123,
+                lastModifiedAt: Date(timeIntervalSinceReferenceDate: 456),
+                completedAt: Date(timeIntervalSinceReferenceDate: 789)
+            ),
+            "orthostatic/200.bin": SensorBagBackfillRecord(
+                fileSize: 321,
+                lastModifiedAt: Date(timeIntervalSinceReferenceDate: 654),
+                completedAt: Date(timeIntervalSinceReferenceDate: 987)
+            ),
+        ]
+        let legacyURL = SensorBagBackfillIndex.legacyURL(in: root)
+        try JSONEncoder().encode(expected).write(to: legacyURL, options: .atomic)
+
+        let migrated = try SensorBagBackfillIndex.records(in: root)
+
+        XCTAssertEqual(migrated, expected)
+        XCTAssertTrue(
+            fm.fileExists(
+                atPath: SensorBagBackfillIndex.databaseURL(in: root).path
+            )
+        )
+        XCTAssertFalse(fm.fileExists(atPath: legacyURL.path))
+        XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), expected)
+    }
+
+    func test_sensorBagBackfillIndex_invalidLegacyJSONFailsWithoutDeletion() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let legacyURL = SensorBagBackfillIndex.legacyURL(in: root)
+        let invalidData = Data("not-json".utf8)
+        try invalidData.write(to: legacyURL, options: .atomic)
+
+        XCTAssertThrowsError(try SensorBagBackfillIndex.records(in: root)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("decode legacy index"))
+        }
+        XCTAssertEqual(try Data(contentsOf: legacyURL), invalidData)
+    }
+
+    func test_sensorBagBackfillIndex_upsertAndResetAreTransactional() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let key = "continuous/recording.bin"
+        try SensorBagBackfillIndex.markCompleted(
+            key: key,
+            fileSize: 10,
+            lastModifiedAt: Date(timeIntervalSinceReferenceDate: 20),
+            completedAt: Date(timeIntervalSinceReferenceDate: 30),
+            in: root
+        )
+        let replacement = SensorBagBackfillRecord(
+            fileSize: 40,
+            lastModifiedAt: Date(timeIntervalSinceReferenceDate: 50),
+            completedAt: Date(timeIntervalSinceReferenceDate: 60)
+        )
+        try SensorBagBackfillIndex.markCompleted(
+            key: key,
+            fileSize: replacement.fileSize,
+            lastModifiedAt: replacement.lastModifiedAt,
+            completedAt: replacement.completedAt,
+            in: root
+        )
+
+        XCTAssertEqual(
+            try SensorBagBackfillIndex.records(in: root),
+            [key: replacement]
+        )
+        XCTAssertEqual(
+            try SensorBagBackfillIndex.reset(in: root),
+            SensorBagBackfillResetResult(
+                removedRecords: 1,
+                warningMessage: nil
+            )
+        )
+        XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+    }
+
+    func test_sensorBagBackfillIndex_interruptedResetFinishesBeforeMigration() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        try SensorBagBackfillIndex.markCompleted(
+            key: "continuous/indexed.bin",
+            fileSize: 1,
+            lastModifiedAt: Date(timeIntervalSinceReferenceDate: 2),
+            completedAt: Date(timeIntervalSinceReferenceDate: 3),
+            in: root
+        )
+        let legacy = [
+            "continuous/legacy.bin": SensorBagBackfillRecord(
+                fileSize: 4,
+                lastModifiedAt: Date(timeIntervalSinceReferenceDate: 5),
+                completedAt: Date(timeIntervalSinceReferenceDate: 6)
+            )
+        ]
+        let legacyURL = SensorBagBackfillIndex.legacyURL(in: root)
+        try JSONEncoder().encode(legacy).write(to: legacyURL, options: .atomic)
+        let markerURL = SensorBagBackfillIndex.resetMarkerURL(in: root)
+        try Data().write(to: markerURL, options: .atomic)
+
+        XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+        XCTAssertFalse(fm.fileExists(atPath: legacyURL.path))
+        XCTAssertFalse(fm.fileExists(atPath: markerURL.path))
+    }
+
+    func test_sensorBagBackfillIndex_resetRecoversCorruptSQLiteAndReportsIt() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let databaseURL = SensorBagBackfillIndex.databaseURL(in: root)
+        try Data("not-sqlite".utf8).write(to: databaseURL, options: .atomic)
+
+        let result = try SensorBagBackfillIndex.reset(in: root)
+
+        XCTAssertEqual(result.removedRecords, 0)
+        XCTAssertTrue(
+            try XCTUnwrap(result.warningMessage).contains(
+                "Unreadable SQLite state was intentionally cleared"
+            )
+        )
+        XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+    }
+
+    func test_sensorBagBackfillIndex_resetReportsClearedInvalidLegacyJSON() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let legacyURL = SensorBagBackfillIndex.legacyURL(in: root)
+        try Data("not-json".utf8).write(to: legacyURL, options: .atomic)
+
+        let result = try SensorBagBackfillIndex.reset(in: root)
+
+        XCTAssertEqual(result.removedRecords, 0)
+        XCTAssertTrue(
+            try XCTUnwrap(result.warningMessage).contains(
+                "Unreadable legacy JSON was intentionally cleared"
+            )
+        )
+        XCTAssertFalse(fm.fileExists(atPath: legacyURL.path))
+        XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+    }
 }
 
 private final class FailingRecordingNotificationCenter: RecordingNotificationScheduling {

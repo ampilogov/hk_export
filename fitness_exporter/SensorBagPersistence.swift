@@ -32,19 +32,48 @@ enum SensorBagPersistence {
         let importedFiles: Int
         let unchangedFiles: Int
         let failedFiles: Int
+        let errorMessage: String?
     }
 
     private static let syncVersion = NSNumber(value: 1)
     private static let syncIdentifierRoot = "com.artemz.fitness_exporter.sensorbag"
-    private static let backfillIndexFileName = ".sensorbag_hk_backfill_index.json"
-    private static let backfillIndexQueue = DispatchQueue(
-        label: "com.fitness_exporter.sensorbagBackfillIndexQueue")
+    private static let workStateLock = NSLock()
 
-    private struct BackfillIndexEntry: Codable {
-        let fileSize: Int64
-        let lastModifiedAt: Date
-        let completedAt: Date
+    private struct FileMetadata {
+        let size: Int64
+        let mtime: Date
+        let resourceIdentifier: NSObject?
     }
+
+    private struct SavedFileSnapshot {
+        let data: Data
+        let metadata: FileMetadata
+    }
+
+    private struct ActiveImport {
+        var completions: [(ImportResult) -> Void]
+    }
+
+    private struct ActiveBackfill {
+        let onlyPending: Bool
+        var completions: [(BackfillSummary) -> Void]
+    }
+
+    private enum ImportCoordination {
+        case start
+        case joined
+        case rejected(String)
+    }
+
+    private enum BackfillCoordination {
+        case start
+        case joined
+        case rejected(String)
+    }
+
+    private static var activeImports: [String: ActiveImport] = [:]
+    private static var activeBackfill: ActiveBackfill?
+    private static var resetInProgress = false
 
     /// Save a sensor bag to the documents directory under the given subdirectory.
     /// - Returns: URL of the saved file.
@@ -76,15 +105,19 @@ enum SensorBagPersistence {
         mode: ImportMode = .recovery,
         completion: ((ImportResult) -> Void)? = nil
     ) {
+        let coordinationKey = backfillFileKey(fileURL: fileURL, profile: profile)
+        switch beginImport(key: coordinationKey, completion: completion) {
+        case .start:
+            break
+        case .joined:
+            return
+        case .rejected(let message):
+            deliverImportResult(.failed(message), to: completion)
+            return
+        }
+
         func finish(_ result: ImportResult) {
-            guard let completion else { return }
-            if Thread.isMainThread {
-                completion(result)
-            } else {
-                DispatchQueue.main.async {
-                    completion(result)
-                }
-            }
+            completeImport(key: coordinationKey, result: result)
         }
 
         DispatchQueue.global(qos: .utility).async {
@@ -93,13 +126,14 @@ enum SensorBagPersistence {
                 return
             }
 
-            let fileData: Data
+            let fileSnapshot: SavedFileSnapshot
             do {
-                fileData = try Data(contentsOf: fileURL)
+                fileSnapshot = try readStableFile(fileURL: fileURL)
             } catch {
                 finish(.failed("Can't read \(fileURL.lastPathComponent): \(error.localizedDescription)"))
                 return
             }
+            let fileData = fileSnapshot.data
 
             let events: [SensorEvent]
             do {
@@ -113,7 +147,24 @@ enum SensorBagPersistence {
             let rrEvents = profile == .orthostatic ? orthostaticRRWindowEvents(from: events) : events
             let beats = rrBeats(from: rrEvents)
             if hrPoints.isEmpty, beats.isEmpty {
-                finish(.noData)
+                do {
+                    try verifyFileUnchanged(
+                        fileURL: fileURL,
+                        expected: fileSnapshot.metadata
+                    )
+                    try markFileBackfilled(
+                        fileURL: fileURL,
+                        profile: profile,
+                        metadata: fileSnapshot.metadata
+                    )
+                    finish(.noData)
+                } catch {
+                    let message =
+                        "No HealthKit data was found, but completion state could not be saved: "
+                        + error.localizedDescription
+                    CustomLogger.log("[SensorBag][HK] \(message)")
+                    finish(.failed(message))
+                }
                 return
             }
 
@@ -172,11 +223,28 @@ enum SensorBagPersistence {
                         }
                     }
 
-                    group.notify(queue: .main) {
+                    group.notify(queue: .global(qos: .utility)) {
                         let merged = mergeImportResults(results)
                         switch merged {
                         case .imported, .alreadyPresent, .noData:
-                            markFileBackfilled(fileURL: fileURL, profile: profile)
+                            do {
+                                try verifyFileUnchanged(
+                                    fileURL: fileURL,
+                                    expected: fileSnapshot.metadata
+                                )
+                                try markFileBackfilled(
+                                    fileURL: fileURL,
+                                    profile: profile,
+                                    metadata: fileSnapshot.metadata
+                                )
+                            } catch {
+                                let message =
+                                    "HealthKit import finished, but completion state could not be saved: "
+                                    + error.localizedDescription
+                                CustomLogger.log("[SensorBag][HK] \(message)")
+                                finish(.failed(message))
+                                return
+                            }
                         case .failed:
                             break
                         }
@@ -193,80 +261,137 @@ enum SensorBagPersistence {
         onlyPending: Bool = true,
         completion: @escaping (BackfillSummary) -> Void
     ) {
-        let allFiles = listSavedFilesForBackfill()
-        let memorySnapshot = backfillIndexQueue.sync { loadBackfillIndex() }
-        let pendingFiles: [(URL, Profile)] =
-            onlyPending
-            ? allFiles.filter { !isFileMarkedBackfilled(fileURL: $0.0, profile: $0.1, index: memorySnapshot) }
-            : allFiles
-        let skippedByMemory = max(0, allFiles.count - pendingFiles.count)
-
-        if pendingFiles.isEmpty {
-            completion(
+        switch beginBackfill(onlyPending: onlyPending, completion: completion) {
+        case .start:
+            break
+        case .joined:
+            return
+        case .rejected(let message):
+            deliverBackfillSummary(
                 BackfillSummary(
-                    totalFiles: allFiles.count,
+                    totalFiles: 0,
                     pendingFiles: 0,
-                    skippedByMemoryFiles: skippedByMemory,
+                    skippedByMemoryFiles: 0,
                     importedFiles: 0,
                     unchangedFiles: 0,
-                    failedFiles: 0
-                ))
+                    failedFiles: 0,
+                    errorMessage: message
+                ),
+                to: completion
+            )
             return
         }
 
-        var imported = 0
-        var unchanged = 0
-        var failed = 0
+        func finish(_ summary: BackfillSummary) {
+            completeBackfill(summary)
+        }
 
-        func process(_ idx: Int) {
-            guard idx < pendingFiles.count else {
-                completion(
+        DispatchQueue.global(qos: .utility).async {
+            let allFiles: [(URL, Profile)]
+            let pendingFiles: [(URL, Profile)]
+            let skippedByMemory: Int
+            do {
+                allFiles = try listSavedFilesForBackfill()
+                if onlyPending {
+                    let memorySnapshot = try SensorBagBackfillIndex.records(
+                        in: documentsDirectory()
+                    )
+                    pendingFiles = try allFiles.filter {
+                        try !isFileMarkedBackfilled(
+                            fileURL: $0.0,
+                            profile: $0.1,
+                            index: memorySnapshot
+                        )
+                    }
+                } else {
+                    pendingFiles = allFiles
+                }
+                skippedByMemory = max(0, allFiles.count - pendingFiles.count)
+            } catch {
+                let message = error.localizedDescription
+                CustomLogger.log("[SensorBag][HK] Backfill setup failed: \(message)")
+                finish(
                     BackfillSummary(
-                        totalFiles: allFiles.count,
-                        pendingFiles: pendingFiles.count,
-                        skippedByMemoryFiles: skippedByMemory,
-                        importedFiles: imported,
-                        unchangedFiles: unchanged,
-                        failedFiles: failed
-                    ))
+                        totalFiles: 0,
+                        pendingFiles: 0,
+                        skippedByMemoryFiles: 0,
+                        importedFiles: 0,
+                        unchangedFiles: 0,
+                        failedFiles: 0,
+                        errorMessage: message
+                    )
+                )
                 return
             }
 
-            let (fileURL, profile) = pendingFiles[idx]
-            importSavedBagToHealthKit(fileURL: fileURL, profile: profile, deviceName: nil) { result in
-                switch result {
-                case .imported:
-                    imported += 1
-                case .alreadyPresent, .noData:
-                    unchanged += 1
-                case .failed(let reason):
-                    failed += 1
-                    CustomLogger.log("[SensorBag][HK] Backfill failed for \(fileURL.lastPathComponent): \(reason)")
+            guard !pendingFiles.isEmpty else {
+                finish(
+                    BackfillSummary(
+                        totalFiles: allFiles.count,
+                        pendingFiles: 0,
+                        skippedByMemoryFiles: skippedByMemory,
+                        importedFiles: 0,
+                        unchangedFiles: 0,
+                        failedFiles: 0,
+                        errorMessage: nil
+                    )
+                )
+                return
+            }
+
+            DispatchQueue.main.async {
+                var imported = 0
+                var unchanged = 0
+                var failed = 0
+
+                func process(_ idx: Int) {
+                    guard idx < pendingFiles.count else {
+                        finish(
+                            BackfillSummary(
+                                totalFiles: allFiles.count,
+                                pendingFiles: pendingFiles.count,
+                                skippedByMemoryFiles: skippedByMemory,
+                                importedFiles: imported,
+                                unchangedFiles: unchanged,
+                                failedFiles: failed,
+                                errorMessage: nil
+                            )
+                        )
+                        return
+                    }
+
+                    let (fileURL, profile) = pendingFiles[idx]
+                    importSavedBagToHealthKit(
+                        fileURL: fileURL,
+                        profile: profile,
+                        deviceName: nil
+                    ) { result in
+                        switch result {
+                        case .imported:
+                            imported += 1
+                        case .alreadyPresent, .noData:
+                            unchanged += 1
+                        case .failed(let reason):
+                            failed += 1
+                            CustomLogger.log(
+                                "[SensorBag][HK] Backfill failed for "
+                                    + "\(fileURL.lastPathComponent): \(reason)"
+                            )
+                        }
+                        process(idx + 1)
+                    }
                 }
-                DispatchQueue.main.async {
-                    process(idx + 1)
-                }
+
+                process(0)
             }
         }
-
-        process(0)
     }
 
     @discardableResult
-    static func resetBackfillMemory() -> Int {
-        backfillIndexQueue.sync {
-            let current = loadBackfillIndex()
-            let removed = current.count
-            do {
-                let url = backfillIndexURL()
-                if FileManager.default.fileExists(atPath: url.path) {
-                    try FileManager.default.removeItem(at: url)
-                }
-            } catch {
-                CustomLogger.log("[SensorBag][HK] Failed to reset backfill memory: \(error.localizedDescription)")
-            }
-            return removed
-        }
+    static func resetBackfillMemory() throws -> SensorBagBackfillResetResult {
+        try beginReset()
+        defer { endReset() }
+        return try SensorBagBackfillIndex.reset(in: documentsDirectory())
     }
 
     /// Write a list of heartbeats to HealthKit.
@@ -423,22 +548,53 @@ enum SensorBagPersistence {
         return .alreadyPresent
     }
 
-    private static func listSavedFilesForBackfill() -> [(URL, Profile)] {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    private static func listSavedFilesForBackfill() throws -> [(URL, Profile)] {
+        let documents = documentsDirectory()
         var files: [(URL, Profile)] = []
 
         for profile in Profile.allCases {
             let dir = documents.appendingPathComponent(profile.rawValue, isDirectory: true)
-            guard let urls = try? FileManager.default.contentsOfDirectory(
-                at: dir,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )
-            else { continue }
+            guard FileManager.default.fileExists(atPath: dir.path) else { continue }
+            let urls: [URL]
+            do {
+                urls = try FileManager.default.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                )
+            } catch {
+                throw NSError(
+                    domain: "SensorBagPersistence",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Can't list \(profile.rawValue) recordings: "
+                            + error.localizedDescription
+                    ]
+                )
+            }
 
-            let binFiles: [URL] = urls.filter { $0.pathExtension.lowercased() == "bin" }.filter { url in
-                (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-            }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            var binFiles: [URL] = []
+            for url in urls where url.pathExtension.lowercased() == "bin" {
+                let values: URLResourceValues
+                do {
+                    values = try url.resourceValues(forKeys: [.isRegularFileKey])
+                } catch {
+                    throw NSError(
+                        domain: "SensorBagPersistence",
+                        code: 3,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Can't inspect \(url.lastPathComponent): "
+                                + error.localizedDescription
+                        ]
+                    )
+                }
+                if values.isRegularFile == true {
+                    binFiles.append(url)
+                }
+            }
+            binFiles.sort { $0.lastPathComponent < $1.lastPathComponent }
             for file in binFiles {
                 files.append((file, profile))
             }
@@ -447,67 +603,252 @@ enum SensorBagPersistence {
         return files
     }
 
-    private static func backfillIndexURL() -> URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documents.appendingPathComponent(backfillIndexFileName)
+    private static func documentsDirectory() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
     private static func backfillFileKey(fileURL: URL, profile: Profile) -> String {
         "\(profile.rawValue)/\(fileURL.lastPathComponent)"
     }
 
-    private static func fileMetadata(fileURL: URL) -> (size: Int64, mtime: Date)? {
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
-        guard let values = try? fileURL.resourceValues(forKeys: keys) else { return nil }
-        guard let size = values.fileSize.map({ Int64($0) }), let mtime = values.contentModificationDate else {
-            return nil
+    private static func fileMetadata(
+        fileURL: URL,
+        includeIdentity: Bool = false
+    ) throws -> FileMetadata {
+        var keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+        if includeIdentity {
+            keys.insert(.fileResourceIdentifierKey)
         }
-        return (size, mtime)
-    }
-
-    private static func loadBackfillIndex() -> [String: BackfillIndexEntry] {
-        let url = backfillIndexURL()
-        guard let data = try? Data(contentsOf: url) else { return [:] }
-        return (try? JSONDecoder().decode([String: BackfillIndexEntry].self, from: data)) ?? [:]
-    }
-
-    private static func saveBackfillIndex(_ index: [String: BackfillIndexEntry]) {
+        let values: URLResourceValues
         do {
-            let data = try JSONEncoder().encode(index)
-            try data.write(to: backfillIndexURL(), options: .atomic)
+            values = try fileURL.resourceValues(forKeys: keys)
         } catch {
-            CustomLogger.log("[SensorBag][HK] Failed to persist backfill memory: \(error.localizedDescription)")
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 4,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Can't read metadata for \(fileURL.lastPathComponent): "
+                        + error.localizedDescription
+                ]
+            )
         }
-    }
-
-    private static func isFileMarkedBackfilled(fileURL: URL, profile: Profile) -> Bool {
-        let index = backfillIndexQueue.sync { loadBackfillIndex() }
-        return isFileMarkedBackfilled(fileURL: fileURL, profile: profile, index: index)
+        guard let size = values.fileSize.map({ Int64($0) }), let mtime = values.contentModificationDate else {
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 5,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Missing size or modification date for \(fileURL.lastPathComponent)"
+                ]
+            )
+        }
+        return FileMetadata(
+            size: size,
+            mtime: mtime,
+            resourceIdentifier: values.fileResourceIdentifier as? NSObject
+        )
     }
 
     private static func isFileMarkedBackfilled(
         fileURL: URL,
         profile: Profile,
-        index: [String: BackfillIndexEntry]
-    ) -> Bool {
+        index: [String: SensorBagBackfillRecord]
+    ) throws -> Bool {
         let key = backfillFileKey(fileURL: fileURL, profile: profile)
         guard let record = index[key] else { return false }
-        guard let current = fileMetadata(fileURL: fileURL) else { return false }
+        let current = try fileMetadata(fileURL: fileURL)
         return record.fileSize == current.size && record.lastModifiedAt == current.mtime
     }
 
-    private static func markFileBackfilled(fileURL: URL, profile: Profile) {
-        backfillIndexQueue.sync {
-            guard let current = fileMetadata(fileURL: fileURL) else { return }
-            let key = backfillFileKey(fileURL: fileURL, profile: profile)
-            var index = loadBackfillIndex()
-            index[key] = BackfillIndexEntry(
-                fileSize: current.size,
-                lastModifiedAt: current.mtime,
-                completedAt: Date()
+    private static func markFileBackfilled(
+        fileURL: URL,
+        profile: Profile,
+        metadata: FileMetadata
+    ) throws {
+        try SensorBagBackfillIndex.markCompleted(
+            key: backfillFileKey(fileURL: fileURL, profile: profile),
+            fileSize: metadata.size,
+            lastModifiedAt: metadata.mtime,
+            in: documentsDirectory()
+        )
+    }
+
+    private static func readStableFile(fileURL: URL) throws -> SavedFileSnapshot {
+        let before = try fileMetadata(fileURL: fileURL, includeIdentity: true)
+        let data = try Data(contentsOf: fileURL)
+        let after = try fileMetadata(fileURL: fileURL, includeIdentity: true)
+        guard fileMetadataMatches(before, after),
+              Int64(data.count) == before.size else {
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 6,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "\(fileURL.lastPathComponent) changed while it was being read"
+                ]
             )
-            saveBackfillIndex(index)
         }
+        return SavedFileSnapshot(data: data, metadata: before)
+    }
+
+    private static func verifyFileUnchanged(
+        fileURL: URL,
+        expected: FileMetadata
+    ) throws {
+        let current = try fileMetadata(fileURL: fileURL, includeIdentity: true)
+        guard fileMetadataMatches(expected, current) else {
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 7,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "\(fileURL.lastPathComponent) changed during its HealthKit import; "
+                        + "the replacement remains pending"
+                ]
+            )
+        }
+    }
+
+    private static func fileMetadataMatches(
+        _ lhs: FileMetadata,
+        _ rhs: FileMetadata
+    ) -> Bool {
+        guard lhs.size == rhs.size, lhs.mtime == rhs.mtime else { return false }
+        switch (lhs.resourceIdentifier, rhs.resourceIdentifier) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            return lhs.isEqual(rhs)
+        default:
+            return false
+        }
+    }
+
+    private static func beginImport(
+        key: String,
+        completion: ((ImportResult) -> Void)?
+    ) -> ImportCoordination {
+        workStateLock.lock()
+        defer { workStateLock.unlock() }
+
+        guard !resetInProgress else {
+            return .rejected("HealthKit backfill memory is being reset; this file remains pending")
+        }
+        if var active = activeImports[key] {
+            if let completion {
+                active.completions.append(completion)
+                activeImports[key] = active
+            }
+            return .joined
+        }
+        activeImports[key] = ActiveImport(
+            completions: completion.map { [$0] } ?? []
+        )
+        return .start
+    }
+
+    private static func completeImport(key: String, result: ImportResult) {
+        workStateLock.lock()
+        let completions = activeImports.removeValue(forKey: key)?.completions ?? []
+        workStateLock.unlock()
+
+        for completion in completions {
+            deliverImportResult(result, to: completion)
+        }
+    }
+
+    private static func deliverImportResult(
+        _ result: ImportResult,
+        to completion: ((ImportResult) -> Void)?
+    ) {
+        guard let completion else { return }
+        if Thread.isMainThread {
+            completion(result)
+        } else {
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+    private static func beginBackfill(
+        onlyPending: Bool,
+        completion: @escaping (BackfillSummary) -> Void
+    ) -> BackfillCoordination {
+        workStateLock.lock()
+        defer { workStateLock.unlock() }
+
+        guard !resetInProgress else {
+            return .rejected("HealthKit backfill memory is being reset")
+        }
+        if var activeBackfill {
+            guard activeBackfill.onlyPending == onlyPending else {
+                return .rejected("A different HealthKit backfill is already running")
+            }
+            activeBackfill.completions.append(completion)
+            self.activeBackfill = activeBackfill
+            return .joined
+        }
+        activeBackfill = ActiveBackfill(
+            onlyPending: onlyPending,
+            completions: [completion]
+        )
+        return .start
+    }
+
+    private static func completeBackfill(_ summary: BackfillSummary) {
+        workStateLock.lock()
+        let completions = activeBackfill?.completions ?? []
+        activeBackfill = nil
+        workStateLock.unlock()
+
+        for completion in completions {
+            deliverBackfillSummary(summary, to: completion)
+        }
+    }
+
+    private static func deliverBackfillSummary(
+        _ summary: BackfillSummary,
+        to completion: @escaping (BackfillSummary) -> Void
+    ) {
+        if Thread.isMainThread {
+            completion(summary)
+        } else {
+            DispatchQueue.main.async {
+                completion(summary)
+            }
+        }
+    }
+
+    private static func beginReset() throws {
+        workStateLock.lock()
+        defer { workStateLock.unlock() }
+
+        guard !resetInProgress else {
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 8,
+                userInfo: [NSLocalizedDescriptionKey: "A backfill reset is already running"]
+            )
+        }
+        guard activeBackfill == nil, activeImports.isEmpty else {
+            throw NSError(
+                domain: "SensorBagPersistence",
+                code: 9,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Wait for the active HealthKit import or backfill to finish before resetting"
+                ]
+            )
+        }
+        resetInProgress = true
+    }
+
+    private static func endReset() {
+        workStateLock.lock()
+        resetInProgress = false
+        workStateLock.unlock()
     }
 
     private static func writeBeatsToHealthKitAuthorized(
