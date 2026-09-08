@@ -38,7 +38,7 @@ Find the causes of crashes or unexpected app termination during long recordings.
 
 The app must remain responsive with tens of thousands of existing recordings. Opening the Upload screen, determining pending work, and uploading recordings should not require long waits. While continuous recording is active, each finalized package should be durably queued and sent immediately over either Wi-Fi or cellular; it must not wait for the user to stop recording or for an opportunistic background task. Future recordings should produce substantially fewer permanent local files.
 
-**Status:** In progress — background, file-backed transfers are next
+**Status:** In progress — collection-wide retry control and quieter progress logging are next
 
 ### R4 — Automatically reconnect and resume recording
 
@@ -91,7 +91,7 @@ Allow navigation to other tabs while continuous recording continues. Keep record
 | ID | Requirement | Status | Next milestone |
 | --- | --- | --- | --- |
 | R2 | Crash prevention and diagnostics | In progress | Review retained diagnostics only if termination or recording stall recurs during normal use |
-| R3 | File and upload efficiency | In progress | Move transfers to a background session with file-backed request bodies |
+| R3 | File and upload efficiency | In progress | Add a collection-level retry budget and aggregate repetitive upload logs |
 | R4 | Auto reconnect and resume | In progress | Include reconnect and all-stream recovery in the bundled real-device validation pass |
 | R5 | Notification behavior | In progress | Include the 10-second and 60-second iPhone/Watch alerts in the same validation pass |
 | R6 | Interactive ECG | Proposed | Add time-range ECG decoding for existing recordings |
@@ -129,15 +129,11 @@ Acceptance criteria:
 Current observations:
 
 - Each recording window creates a separate `.bin` file.
-- Uploads are serial, and each file is fully loaded, wrapped in a property list, and gzip-compressed in memory.
-- An unreachable server can perform four attempts per file without a collection-level circuit breaker.
 - Upload logging magnifies backlog work: each file emits multiple persistent logs, and each log rebuilds and rewrites up to 400 records in `UserDefaults`.
-- Upload uses a default foreground `URLSession`, so the operating system does not own continuation of a transfer after suspension or termination.
 
 Proposed approach:
 
 - Continue producing the same five-minute `.bin` upload artifacts with the same filename scheme and bytes. Reduce local top-level file count only through reversible local indexing or post-upload archival that can reproduce every original file exactly.
-- Use a background `URLSession` and file-backed request bodies so the system can continue eligible transfers while the app is suspended and upload memory remains bounded.
 - Add a collection-level circuit breaker and retry budget. Immediate sending over cellular is required, but a confirmed server/network outage must pause and reschedule the batch instead of retrying every pending file continuously.
 - Aggregate repetitive logs into periodic progress summaries.
 - Any future bundled or resumable transport must remain outside scope unless the server migration and compatibility contract are explicitly approved.
@@ -149,11 +145,10 @@ Acceptance criteria:
 - UI rendering does not trigger repeated directory scans or metadata reads.
 - Local compaction can reproduce every original five-minute filename and byte sequence exactly; until compaction is verified and reversible, the original files remain untouched.
 - A collection-wide network failure performs a bounded number of attempts and cannot generate one retry storm per pending file.
-- Upload memory use does not scale with the total backlog.
 
 Dependencies and decisions:
 
-- Server protocol changes are not part of the current plan. Asynchronous UI, a single local index, bounded-memory uploads, and reversible local archival can be completed while preserving the existing server contract.
+- Server protocol changes are not part of the current plan. Reversible local archival can be completed while preserving the existing server contract.
 - Retention policy must remain conservative by default: keep source data unless deletion has been explicitly enabled.
 
 ### R4 considerations — Auto reconnect and recording resume

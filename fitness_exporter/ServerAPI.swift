@@ -1,5 +1,4 @@
 import CoreLocation
-import CryptoKit
 import Foundation
 import HealthKit
 import Security
@@ -184,69 +183,6 @@ class ServerSession {
         let session = ServerSession(server: server)
         SESSIONS[server] = (session, now)
         return session
-    }
-
-    func uploadFile(
-        dirName: String,
-        fileName: String,
-        fileBytes: Data,
-        fullPath: String,
-        sender: String,
-        timeout: TimeInterval? = 60,
-        cancellationToken: UploadCancellationToken? = nil,
-        completion: @escaping (String?) -> Void
-    ) {
-        guard let baseURL = URL(string: server) else {
-            return completion("Invalid base URL: \(server)")
-        }
-
-        var request = URLRequest(url: baseURL.appendingPathComponent("file"))
-        request.httpMethod = "POST"
-        if let timeout = timeout { request.timeoutInterval = timeout }
-        request.setValue("application/x-plist", forHTTPHeaderField: "Content-Type")
-        request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
-
-        let senderHash = SHA256.hash(
-            data: Data((sender + HealthDataExporter.SENDER_EXTRA_KEY).utf8)
-        ).compactMap { String(format: "%02x", $0) }.joined()
-
-        let payload: [String: Any] = [
-            "version": HealthDataExporter.VERSION,
-            "sender_sha256": senderHash,
-            "dir_name": dirName,
-            "file_name": fileName,
-            "full_path": fullPath,
-            "file_bytes": fileBytes,
-        ]
-
-        do {
-            let plist = try PropertyListSerialization.data(
-                fromPropertyList: payload, format: .binary, options: 0
-            )
-            if let gz = compress(data: plist) {
-                request.httpBody = gz
-            } else {
-                return completion("Failed to compress upload body")
-            }
-        } catch {
-            return completion("Failed to encode upload payload: \(error.localizedDescription)")
-        }
-
-        performRequestWithRetry(
-            request,
-            attempts: 4,
-            cancellationToken: cancellationToken
-        ) { _, response, error in
-            if let error = error {
-                CustomLogger.log("Upload client error: \(error.localizedDescription)")
-                return completion("Client error: \(error.localizedDescription)")
-            }
-            guard let http = response as? HTTPURLResponse,
-                  (200...299).contains(http.statusCode) else {
-                return completion("Server error: \(String(describing: response))")
-            }
-            return completion(nil)
-        }
     }
 
     private init(server: String) {

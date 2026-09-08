@@ -86,6 +86,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             type: .info)
         CustomLogger.log("[App] App launched with background fetch enabled")
         CrashDiagnosticsReporter.shared.start()
+        BackgroundFileUploadManager.shared.activate()
 
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: AppDelegate.BG_APP_REFRESH_IDENTIFIER,
@@ -115,6 +116,23 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = self
 
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == BackgroundFileUploadManager.sessionIdentifier else {
+            CustomLogger.log(
+                "[Upload][Background][Error] Unknown session identifier: \(identifier)"
+            )
+            completionHandler()
+            return
+        }
+        BackgroundFileUploadManager.shared.handleEvents(
+            completionHandler: completionHandler
+        )
     }
 
     func handleAppRefreshTask(task: BGAppRefreshTask) {

@@ -677,11 +677,13 @@ final class ImmediateUploadService {
         DirectoryUploader.uploadFile(
             file: fileURL,
             baseURL: baseURL,
+            baseBookmark: directory.bookmark,
             dirName: directory.name,
             server: config.server,
             sender: config.sender,
             priority: .immediate,
-            expectedRecord: pending.record
+            expectedRecord: pending.record,
+            immediateRelativePath: pending.relativePath
         ) { [weak self] error in
             guard let self else { return }
             self.workerQueue.async {
@@ -710,6 +712,38 @@ final class ImmediateUploadService {
                     )
                 }
             }
+        }
+    }
+
+    /// Re-enters the durable immediate queue when iOS delivered a background
+    /// session result after the process that scheduled it was terminated.
+    func handleRecoveredBackgroundResult(
+        relativePath: String,
+        error: String?
+    ) {
+        workerQueue.async { [weak self] in
+            guard let self else { return }
+            if let error {
+                do {
+                    try ImmediateUploadQueue.withDefault { queue in
+                        _ = try queue.markFailed(
+                            relativePath: relativePath,
+                            error: error
+                        )
+                    }
+                } catch ImmediateUploadQueueError.missingRecord {
+                    CustomLogger.log(
+                        "[Upload][Immediate] Recovered task no longer has a "
+                            + "queue row: \(relativePath)"
+                    )
+                } catch {
+                    CustomLogger.log(
+                        "[Upload][Immediate][Error] Could not retain recovered "
+                            + "result for \(relativePath): \(error.localizedDescription)"
+                    )
+                }
+            }
+            self.resume()
         }
     }
 

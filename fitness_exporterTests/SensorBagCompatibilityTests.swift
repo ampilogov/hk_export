@@ -1,5 +1,7 @@
-import XCTest
+import CryptoKit
 import UserNotifications
+import XCTest
+import zlib
 @testable import fitness_exporter
 
 final class SensorBagCompatibilityTests: XCTestCase {
@@ -1258,6 +1260,186 @@ final class SensorBagCompatibilityTests: XCTestCase {
         )
         XCTAssertFalse(fm.fileExists(atPath: legacyURL.path))
         XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+    }
+
+    func test_backgroundUploadBody_preservesServerContractAndSourceBytes() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let bytes = Data((0..<10_000).map { UInt8($0 % 251) })
+        let sender = "contract-test-sender"
+        let sourcePath = "/Documents/continuous/unchanged-name.bin"
+
+        let prepared = try BackgroundUploadBodyBuilder.prepare(
+            jobID: UUID().uuidString,
+            server: "https://example.test/upload/",
+            sender: sender,
+            directoryName: "Continuous",
+            fileName: "unchanged-name.bin",
+            fullPath: sourcePath,
+            fileBytes: bytes,
+            bodiesDirectoryURL: root
+        )
+
+        XCTAssertEqual(
+            prepared.request.url?.absoluteString,
+            "https://example.test/upload/file"
+        )
+        XCTAssertEqual(prepared.request.httpMethod, "POST")
+        XCTAssertEqual(
+            prepared.request.value(forHTTPHeaderField: "Content-Type"),
+            "application/x-plist"
+        )
+        XCTAssertEqual(
+            prepared.request.value(forHTTPHeaderField: "Content-Encoding"),
+            "gzip"
+        )
+        XCTAssertNil(prepared.request.httpBody)
+
+        let compressed = try Data(contentsOf: prepared.bodyURL)
+        let plistData = try gunzip(compressed)
+        let decoded = try XCTUnwrap(
+            try PropertyListSerialization.propertyList(
+                from: plistData,
+                format: nil
+            ) as? [String: Any]
+        )
+        let senderHash = SHA256.hash(
+            data: Data((sender + HealthDataExporter.SENDER_EXTRA_KEY).utf8)
+        ).map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(decoded.count, 6)
+        XCTAssertEqual(decoded["version"] as? String, HealthDataExporter.VERSION)
+        XCTAssertEqual(decoded["sender_sha256"] as? String, senderHash)
+        XCTAssertEqual(decoded["dir_name"] as? String, "Continuous")
+        XCTAssertEqual(decoded["file_name"] as? String, "unchanged-name.bin")
+        XCTAssertEqual(decoded["full_path"] as? String, sourcePath)
+        XCTAssertEqual(decoded["file_bytes"] as? Data, bytes)
+        XCTAssertFalse(
+            fm.fileExists(
+                atPath: root.appendingPathComponent(
+                    prepared.bodyURL.deletingPathExtension()
+                        .lastPathComponent + ".plist.partial"
+                ).path
+            )
+        )
+    }
+
+    func test_backgroundUploadJobStore_roundTripsDurableStateTransitions() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = try BackgroundUploadJobStore(rootURL: root)
+        let id = UUID().uuidString
+        let record = UploadDoneRecord(
+            fileName: "recording.bin",
+            fileSize: 123,
+            lastModifiedAt: Date(timeIntervalSinceReferenceDate: 456)
+        )
+        var job = BackgroundUploadJob(
+            version: BackgroundUploadJob.schemaVersion,
+            id: id,
+            deduplicationKey: "destination-and-source",
+            state: .staged,
+            taskIdentifier: nil,
+            bodyFileName: "\(id).body",
+            basePath: "/Documents/continuous",
+            baseBookmark: Data([1, 2, 3]),
+            sourceFilePath: "/Documents/continuous/recording.bin",
+            record: record,
+            sourceSystemFileNumber: 99,
+            immediateRelativePath: "continuous/recording.bin",
+            createdAt: Date(timeIntervalSinceReferenceDate: 789),
+            lastError: nil
+        )
+
+        try store.insert(job)
+        XCTAssertEqual(try store.job(id: id), job)
+        XCTAssertEqual(
+            try store.job(deduplicationKey: job.deduplicationKey),
+            job
+        )
+
+        job.state = .submitted
+        job.taskIdentifier = 42
+        try store.update(job)
+        XCTAssertEqual(try store.allJobs(), [job])
+
+        job.state = .accepted
+        try store.update(job)
+        XCTAssertEqual(try store.job(id: id), job)
+
+        try store.remove(id: id)
+        XCTAssertNil(try store.job(id: id))
+    }
+
+    func test_backgroundUploadJobStore_keepsCorruptStateForDiagnosis() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = try BackgroundUploadJobStore(rootURL: root)
+        let corruptURL = store.jobsDirectoryURL.appendingPathComponent(
+            "corrupt.json"
+        )
+        let corruptData = Data("not-json".utf8)
+        try corruptData.write(to: corruptURL)
+
+        XCTAssertThrowsError(try store.allJobs()) { error in
+            XCTAssertTrue(
+                error.localizedDescription.contains("Background upload state failed")
+            )
+        }
+        XCTAssertEqual(try Data(contentsOf: corruptURL), corruptData)
+    }
+}
+
+private func gunzip(_ compressed: Data) throws -> Data {
+    var stream = z_stream()
+    let status = inflateInit2_(
+        &stream,
+        MAX_WBITS + 32,
+        ZLIB_VERSION,
+        Int32(MemoryLayout<z_stream>.size)
+    )
+    guard status == Z_OK else {
+        throw NSError(
+            domain: "BackgroundUploadTests",
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "inflate initialization failed"]
+        )
+    }
+    defer { inflateEnd(&stream) }
+
+    return try compressed.withUnsafeBytes { inputBuffer in
+        stream.next_in = UnsafeMutablePointer<Bytef>(
+            mutating: inputBuffer.bindMemory(to: Bytef.self).baseAddress
+        )
+        stream.avail_in = uInt(inputBuffer.count)
+        var output = Data()
+        var result = Int32(Z_OK)
+        repeat {
+            var chunk = Data(count: 64 * 1_024)
+            result = chunk.withUnsafeMutableBytes { outputBuffer in
+                stream.next_out = outputBuffer.bindMemory(
+                    to: Bytef.self
+                ).baseAddress
+                stream.avail_out = uInt(outputBuffer.count)
+                return inflate(&stream, Z_NO_FLUSH)
+            }
+            guard result == Z_OK || result == Z_STREAM_END else {
+                throw NSError(
+                    domain: "BackgroundUploadTests",
+                    code: Int(result),
+                    userInfo: [NSLocalizedDescriptionKey: "inflate failed"]
+                )
+            }
+            output.append(chunk.prefix(chunk.count - Int(stream.avail_out)))
+        } while result != Z_STREAM_END
+        return output
     }
 }
 

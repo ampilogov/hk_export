@@ -100,7 +100,7 @@ enum UploadJobPriority: Int, Comparable {
 struct UploadFileSnapshot {
     let data: Data
     let record: UploadDoneRecord
-    fileprivate let systemFileNumber: UInt64?
+    let systemFileNumber: UInt64?
 }
 
 final class UploadCancellationToken {
@@ -667,6 +667,21 @@ enum UploadHelper {
         return curDate == record.lastModifiedAt
     }
 
+    static func sourceIdentityMatchesFile(
+        record: UploadDoneRecord,
+        systemFileNumber: UInt64?,
+        fileURL: URL
+    ) -> Bool {
+        guard let current = try? fileIdentity(fileURL) else { return false }
+        return identitiesMatch(
+            FileIdentity(
+                record: record,
+                systemFileNumber: systemFileNumber
+            ),
+            current
+        )
+    }
+
     private struct FileIdentity {
         let record: UploadDoneRecord
         let systemFileNumber: UInt64?
@@ -788,9 +803,6 @@ enum DirectoryUploader {
             }
             didFinish = true
             completionLock.unlock()
-            if hasAccess {
-                baseURL.stopAccessingSecurityScopedResource()
-            }
             completion(status)
         }
 
@@ -801,14 +813,21 @@ enum DirectoryUploader {
                 cancellationToken: cancellationToken
             )
         } catch {
+            if hasAccess {
+                baseURL.stopAccessingSecurityScopedResource()
+            }
             CustomLogger.log("[Upload][Error] \(error.localizedDescription)")
             return finish(error.localizedDescription)
+        }
+        if hasAccess {
+            baseURL.stopAccessingSecurityScopedResource()
         }
         guard !inventory.pendingFiles.isEmpty else { return finish(nil) }
 
         self.uploadQueue(
             inventory.pendingFiles,
             baseURL: baseURL,
+            baseBookmark: dir.bookmark,
             dirName: dir.name,
             server: server,
             sender: sender,
@@ -822,6 +841,7 @@ enum DirectoryUploader {
     private static func uploadQueue(
         _ files: [URL],
         baseURL: URL,
+        baseBookmark: Data,
         dirName: String,
         server: String,
         sender: String,
@@ -857,6 +877,7 @@ enum DirectoryUploader {
                 uploadFile(
                     file: file,
                     baseURL: baseURL,
+                    baseBookmark: baseBookmark,
                     dirName: dirName,
                     server: server,
                     sender: sender,
@@ -893,12 +914,14 @@ enum DirectoryUploader {
     static func uploadFile(
         file: URL,
         baseURL: URL,
+        baseBookmark: Data,
         dirName: String,
         server: String,
         sender: String,
         priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken? = nil,
         expectedRecord: UploadDoneRecord? = nil,
+        immediateRelativePath: String? = nil,
         completion: @escaping (String?) -> Void
     ) {
         // The coordinator key must describe the complete server-visible
@@ -922,6 +945,19 @@ enum DirectoryUploader {
                 let hasAccess = baseURL.startAccessingSecurityScopedResource()
                 let finishLock = NSLock()
                 var didFinish = false
+                var releasedAccess = false
+                func releaseAccess() {
+                    finishLock.lock()
+                    guard !releasedAccess else {
+                        finishLock.unlock()
+                        return
+                    }
+                    releasedAccess = true
+                    finishLock.unlock()
+                    if hasAccess {
+                        baseURL.stopAccessingSecurityScopedResource()
+                    }
+                }
                 func finishOnce(_ error: String?) {
                     finishLock.lock()
                     guard !didFinish else {
@@ -930,9 +966,7 @@ enum DirectoryUploader {
                     }
                     didFinish = true
                     finishLock.unlock()
-                    if hasAccess {
-                        baseURL.stopAccessingSecurityScopedResource()
-                    }
+                    releaseAccess()
                     finish(error)
                 }
 
@@ -950,52 +984,49 @@ enum DirectoryUploader {
                             "\(file.lastPathComponent): queued file identity changed"
                         )
                     }
+                    let byteCount = snapshot.data.count
                     CustomLogger.log(
                         "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) "
-                            + "bytes=\(snapshot.data.count)"
+                            + "bytes=\(byteCount)"
                     )
-                    let session = ServerSession.getSession(server: server)
-                    session.uploadFile(
-                        dirName: dirName,
-                        fileName: file.lastPathComponent,
-                        fileBytes: snapshot.data,
-                        fullPath: file.path,
+                    try BackgroundFileUploadManager.shared.uploadFile(
+                        deduplicationKey: key,
+                        server: server,
                         sender: sender,
-                        cancellationToken: cancellationToken
-                    ) { error in
-                        if let error {
-                            CustomLogger.log(
-                                "[Upload][Error] dir=\(dirName) "
-                                    + "file=\(file.lastPathComponent) err=\(error)"
-                            )
-                            return finishOnce(error)
-                        }
-
-                        do {
+                        directoryName: dirName,
+                        baseURL: baseURL,
+                        baseBookmark: baseBookmark,
+                        sourceFileURL: file,
+                        fileBytes: snapshot.data,
+                        record: snapshot.record,
+                        sourceSystemFileNumber: snapshot.systemFileNumber,
+                        immediateRelativePath: immediateRelativePath,
+                        cancellationToken: cancellationToken,
+                        validateSource: {
                             try UploadHelper.verifyUnchanged(
                                 snapshot,
                                 fileURL: file
                             )
-                            try UploadHelper.markDone(
-                                record: snapshot.record,
-                                base: baseURL
-                            )
+                        },
+                        completion: { error in
+                            if let error {
+                                CustomLogger.log(
+                                    "[Upload][Error] dir=\(dirName) "
+                                        + "file=\(file.lastPathComponent) err=\(error)"
+                                )
+                                return finishOnce(error)
+                            }
                             CustomLogger.log(
                                 "[Upload][Success] dir=\(dirName) "
                                     + "file=\(file.lastPathComponent) "
-                                    + "bytes=\(snapshot.data.count)"
+                                    + "bytes=\(byteCount)"
                             )
                             finishOnce(nil)
-                        } catch {
-                            let message = error.localizedDescription
-                            CustomLogger.log(
-                                "[Upload][Error] dir=\(dirName) "
-                                    + "file=\(file.lastPathComponent) err=\(message)"
-                            )
-                            finishOnce(message)
                         }
-                    }
+                    )
+                    releaseAccess()
                 } catch {
+                    releaseAccess()
                     let message = error.localizedDescription
                     CustomLogger.log(
                         "[Upload][Error] dir=\(dirName) "
