@@ -71,6 +71,11 @@ final class ContinuousRecorder: ObservableObject {
         let deviceName: String?
     }
 
+    private struct PersistedBatch {
+        let fileURL: URL
+        let immediateUploadQueueError: String?
+    }
+
     private struct ActiveInterruption {
         let missingSince: Date
         let reason: String
@@ -684,13 +689,27 @@ final class ContinuousRecorder: ObservableObject {
         let finalizationTask = beginFileFinalizationTask()
 
         fileWriteQueue.async { [weak self] in
-            let result: Result<URL, Error>
+            let result: Result<PersistedBatch, Error>
             do {
                 let fileURL = try SensorBagPersistence.save(
                     batch.bag,
                     subdir: "continuous"
                 )
-                result = .success(fileURL)
+                let queueError: String?
+                do {
+                    try ImmediateUploadService.shared.enqueue(fileURL: fileURL)
+                    queueError = nil
+                } catch {
+                    // The source file is already durable. Do not turn a
+                    // downstream queue failure into another file write.
+                    queueError = error.localizedDescription
+                }
+                result = .success(
+                    PersistedBatch(
+                        fileURL: fileURL,
+                        immediateUploadQueueError: queueError
+                    )
+                )
             } catch {
                 result = .failure(error)
             }
@@ -705,7 +724,7 @@ final class ContinuousRecorder: ObservableObject {
 
     private func completePersistence(
         batch: PendingBatch,
-        result: Result<URL, Error>
+        result: Result<PersistedBatch, Error>
     ) {
         let remaining = max(0, (pendingWriteCounts[batch.recordingID] ?? 1) - 1)
         if remaining == 0 {
@@ -715,8 +734,28 @@ final class ContinuousRecorder: ObservableObject {
         }
 
         switch result {
-        case .success(let fileURL):
+        case .success(let persisted):
+            let fileURL = persisted.fileURL
             watchdog.checkpoint(sessionID: batch.recordingID, fileURL: fileURL)
+            if let queueError = persisted.immediateUploadQueueError {
+                notify(
+                    title: "Recording upload queue failed",
+                    body: "The recording was saved, but its upload needs attention.",
+                    identifier: "ContinuousRecording.UploadQueueFailure"
+                )
+                showImmediateUploadError(
+                    "The recording file was saved, but its upload could not be queued: "
+                        + queueError
+                )
+            } else {
+                ImmediateUploadService.shared.resume { [weak self] error in
+                    guard let error else { return }
+                    self?.showImmediateUploadError(
+                        "The recording file remains queued, but its immediate upload failed: "
+                            + error
+                    )
+                }
+            }
             enqueueHealthKitImport(
                 fileURL: fileURL,
                 deviceName: batch.deviceName
@@ -746,6 +785,16 @@ final class ContinuousRecorder: ObservableObject {
         }
 
         finishSessionIfPossible(batch.recordingID)
+    }
+
+    private func showImmediateUploadError(_ message: String) {
+        CustomLogger.log("[Continuous][Upload][Error] \(message)")
+        attention = RecordingAttention(
+            title: "Recording upload pending",
+            message: message,
+            offersWriteRetry: false,
+            endedRecording: false
+        )
     }
 
     private func stopAfterPersistenceFailure(recordingID: UUID) -> Bool {

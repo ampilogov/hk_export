@@ -90,10 +90,17 @@ enum UploadSummaryCache {
 enum UploadJobPriority: Int, Comparable {
     case background
     case foreground
+    case immediate
 
     static func < (lhs: UploadJobPriority, rhs: UploadJobPriority) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
+}
+
+struct UploadFileSnapshot {
+    let data: Data
+    let record: UploadDoneRecord
+    fileprivate let systemFileNumber: UInt64?
 }
 
 final class UploadCancellationToken {
@@ -401,6 +408,110 @@ final class UploadSingleFlightCoordinator {
     }
 }
 
+/// Serializes individual transfers and coalesces duplicate requests for the
+/// same immutable file. Immediate recording uploads are inserted ahead of
+/// backlog work, but never interrupt a file already on the wire.
+final class UploadFileCoordinator {
+    static let shared = UploadFileCoordinator()
+
+    typealias Completion = (String?) -> Void
+    typealias Operation = (@escaping Completion) -> Void
+
+    private struct Job {
+        let id = UUID()
+        let key: String
+        let priority: UploadJobPriority
+        let operation: Operation
+        var completions: [Completion]
+    }
+
+    private let stateQueue = DispatchQueue(
+        label: "com.fitness_exporter.uploadFileCoordinator.state"
+    )
+    private let workerQueue = DispatchQueue(
+        label: "com.fitness_exporter.uploadFileCoordinator.worker",
+        qos: .utility
+    )
+    private var activeJob: Job?
+    private var pendingJobs: [Job] = []
+
+    func submit(
+        key: String,
+        priority: UploadJobPriority,
+        operation: @escaping Operation,
+        completion: @escaping Completion
+    ) {
+        stateQueue.async { [self] in
+            if var activeJob, activeJob.key == key {
+                activeJob.completions.append(completion)
+                self.activeJob = activeJob
+                return
+            }
+            if let index = pendingJobs.firstIndex(where: { $0.key == key }) {
+                let existing = pendingJobs.remove(at: index)
+                if priority > existing.priority {
+                    enqueue(
+                        Job(
+                            key: key,
+                            priority: priority,
+                            operation: operation,
+                            completions: existing.completions + [completion]
+                        )
+                    )
+                } else {
+                    var coalesced = existing
+                    coalesced.completions.append(completion)
+                    enqueue(coalesced)
+                }
+                return
+            }
+            enqueue(
+                Job(
+                    key: key,
+                    priority: priority,
+                    operation: operation,
+                    completions: [completion]
+                )
+            )
+            startNextIfNeeded()
+        }
+    }
+
+    private func enqueue(_ job: Job) {
+        if let index = pendingJobs.firstIndex(
+            where: { $0.priority < job.priority }
+        ) {
+            pendingJobs.insert(job, at: index)
+        } else {
+            pendingJobs.append(job)
+        }
+    }
+
+    private func startNextIfNeeded() {
+        guard activeJob == nil, !pendingJobs.isEmpty else { return }
+        let job = pendingJobs.removeFirst()
+        activeJob = job
+        workerQueue.async { [weak self] in
+            job.operation { result in
+                self?.finish(jobID: job.id, result: result)
+            }
+        }
+    }
+
+    private func finish(jobID: UUID, result: String?) {
+        stateQueue.async { [self] in
+            guard let completed = activeJob, completed.id == jobID else { return }
+            activeJob = nil
+            startNextIfNeeded()
+            workerQueue.async {
+                for completion in completed.completions {
+                    completion(result)
+                }
+            }
+        }
+    }
+}
+
 enum UploadHelper {
     static func resolveURL(from bookmark: Data) -> URL? {
         var isStale = false
@@ -490,15 +601,120 @@ enum UploadHelper {
         try UploadCompletionIndex.markDone(file: file, in: base)
     }
 
+    @discardableResult
+    static func markDone(
+        record: UploadDoneRecord,
+        base: URL
+    ) throws -> UploadDoneRecord {
+        try UploadCompletionIndex.markDone(record: record, in: base)
+    }
+
+    static func doneRecord(fileName: String, base: URL) throws -> UploadDoneRecord? {
+        try UploadCompletionIndex.record(fileName: fileName, in: base)
+    }
+
+    static func readStableFile(_ fileURL: URL) throws -> UploadFileSnapshot {
+        let before = try fileIdentity(fileURL)
+        let data: Data
+        do {
+            data = try Data(contentsOf: fileURL)
+        } catch {
+            throw UploadCoreError.fileReadFailed(
+                "\(fileURL.lastPathComponent): \(error.localizedDescription)"
+            )
+        }
+        let after = try fileIdentity(fileURL)
+        guard identitiesMatch(before, after),
+              Int64(data.count) == before.record.fileSize else {
+            throw UploadCoreError.fileReadFailed(
+                "\(fileURL.lastPathComponent): file changed while being read"
+            )
+        }
+        return UploadFileSnapshot(
+            data: data,
+            record: before.record,
+            systemFileNumber: before.systemFileNumber
+        )
+    }
+
+    static func verifyUnchanged(
+        _ snapshot: UploadFileSnapshot,
+        fileURL: URL
+    ) throws {
+        let expected = FileIdentity(
+            record: snapshot.record,
+            systemFileNumber: snapshot.systemFileNumber
+        )
+        let current = try fileIdentity(fileURL)
+        guard identitiesMatch(expected, current) else {
+            throw UploadCoreError.fileReadFailed(
+                "\(fileURL.lastPathComponent): file changed during upload"
+            )
+        }
+    }
+
     /// Returns true when the on-disk file matches the recorded metadata.
     static func recordMatchesFile(_ record: UploadDoneRecord, fileURL: URL) -> Bool {
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
-        guard let vals = try? fileURL.resourceValues(forKeys: keys) else { return false }
-        let sizeOK = (vals.fileSize.map { Int64($0) } ?? -1) == record.fileSize
-        guard sizeOK else { return false }
-        guard let curDate = vals.contentModificationDate else { return false }
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        ), attributes[.type] as? FileAttributeType == .typeRegular,
+           let size = (attributes[.size] as? NSNumber)?.int64Value,
+           size == record.fileSize,
+           let curDate = attributes[.modificationDate] as? Date else {
+            return false
+        }
         // Strict match: require exact modification timestamp equality.
         return curDate == record.lastModifiedAt
+    }
+
+    private struct FileIdentity {
+        let record: UploadDoneRecord
+        let systemFileNumber: UInt64?
+    }
+
+    private static func fileIdentity(_ fileURL: URL) throws -> FileIdentity {
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(
+                atPath: fileURL.path
+            )
+        } catch {
+            throw UploadCoreError.fileReadFailed(
+                "\(fileURL.lastPathComponent): \(error.localizedDescription)"
+            )
+        }
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              let fileSize = (attributes[.size] as? NSNumber)?.int64Value,
+              let modifiedAt = attributes[.modificationDate] as? Date else {
+            throw UploadCoreError.fileReadFailed(
+                "\(fileURL.lastPathComponent): not a regular file or missing metadata"
+            )
+        }
+        return FileIdentity(
+            record: UploadDoneRecord(
+                fileName: fileURL.lastPathComponent,
+                fileSize: fileSize,
+                lastModifiedAt: modifiedAt
+            ),
+            systemFileNumber: (
+                attributes[.systemFileNumber] as? NSNumber
+            )?.uint64Value
+        )
+    }
+
+    private static func identitiesMatch(
+        _ lhs: FileIdentity,
+        _ rhs: FileIdentity
+    ) -> Bool {
+        guard lhs.record == rhs.record else { return false }
+        switch (lhs.systemFileNumber, rhs.systemFileNumber) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            return lhs == rhs
+        default:
+            return false
+        }
     }
 }
 
@@ -537,6 +753,7 @@ enum DirectoryUploader {
                     server: server,
                     sender: sender,
                     stopOnError: stopOnError,
+                    priority: priority,
                     cancellationToken: cancellationToken,
                     completion: finish
                 )
@@ -550,6 +767,7 @@ enum DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool,
+        priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
@@ -588,14 +806,14 @@ enum DirectoryUploader {
         }
         guard !inventory.pendingFiles.isEmpty else { return finish(nil) }
 
-        let session = ServerSession.getSession(server: server)
         self.uploadQueue(
             inventory.pendingFiles,
             baseURL: baseURL,
             dirName: dir.name,
-            session: session,
+            server: server,
             sender: sender,
             stopOnError: stopOnError,
+            priority: priority,
             cancellationToken: cancellationToken,
             completion: finish
         )
@@ -605,9 +823,10 @@ enum DirectoryUploader {
         _ files: [URL],
         baseURL: URL,
         dirName: String,
-        session: ServerSession,
+        server: String,
         sender: String,
         stopOnError: Bool,
+        priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
@@ -635,62 +854,21 @@ enum DirectoryUploader {
                     continue
                 }
 
-                guard let data = try? Data(contentsOf: file) else {
-                    let message = UploadCoreError.fileReadFailed(
-                        file.lastPathComponent).description
-                    CustomLogger.log(
-                        "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(message)"
-                    )
-                    if stopOnError {
-                        completion(message)
-                        return
-                    }
-                    state.firstError = state.firstError ?? message
-                    continue
-                }
-
-                let size = data.count
-                CustomLogger.log(
-                    "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
-                )
-                session.uploadFile(
+                uploadFile(
+                    file: file,
+                    baseURL: baseURL,
                     dirName: dirName,
-                    fileName: file.lastPathComponent,
-                    fileBytes: data,
-                    fullPath: file.path,
+                    server: server,
                     sender: sender,
+                    priority: priority,
                     cancellationToken: cancellationToken
                 ) { error in
                     if let error {
-                        CustomLogger.log(
-                            "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(error)"
-                        )
                         if stopOnError {
                             completion(error)
                             return
                         }
                         state.firstError = state.firstError ?? error
-                        DispatchQueue.global(qos: .utility).async {
-                            processNext()
-                        }
-                        return
-                    }
-
-                    CustomLogger.log(
-                        "[Upload][Success] dir=\(dirName) file=\(file.lastPathComponent) bytes=\(size)"
-                    )
-                    do {
-                        try UploadHelper.markDone(file: file, base: baseURL)
-                    } catch {
-                        let message = error.localizedDescription
-                        CustomLogger.log(
-                            "[Upload][Error] dir=\(dirName) file=\(file.lastPathComponent) err=\(message)"
-                        )
-                        if stopOnError {
-                            completion(message)
-                            return
-                        }
-                        state.firstError = state.firstError ?? message
                         DispatchQueue.global(qos: .utility).async {
                             processNext()
                         }
@@ -707,6 +885,127 @@ enum DirectoryUploader {
         }
 
         processNext()
+    }
+
+    /// Upload one immutable file snapshot. Every caller uses this path so an
+    /// immediate recording upload and a backlog scan cannot send the same file
+    /// concurrently or mark a replacement file as already accepted.
+    static func uploadFile(
+        file: URL,
+        baseURL: URL,
+        dirName: String,
+        server: String,
+        sender: String,
+        priority: UploadJobPriority,
+        cancellationToken: UploadCancellationToken? = nil,
+        expectedRecord: UploadDoneRecord? = nil,
+        completion: @escaping (String?) -> Void
+    ) {
+        // The coordinator key must describe the complete server-visible
+        // destination. Length-prefixing keeps user-provided values from
+        // colliding when they contain a separator.
+        let key = [
+            server,
+            sender,
+            dirName,
+            baseURL.standardizedFileURL.path,
+            file.standardizedFileURL.path,
+        ].map { "\($0.utf8.count):\($0)" }.joined()
+        UploadFileCoordinator.shared.submit(
+            key: key,
+            priority: priority,
+            operation: { finish in
+                guard cancellationToken?.isCancelled != true else {
+                    return finish(UploadCoreError.cancelled.description)
+                }
+
+                let hasAccess = baseURL.startAccessingSecurityScopedResource()
+                let finishLock = NSLock()
+                var didFinish = false
+                func finishOnce(_ error: String?) {
+                    finishLock.lock()
+                    guard !didFinish else {
+                        finishLock.unlock()
+                        return
+                    }
+                    didFinish = true
+                    finishLock.unlock()
+                    if hasAccess {
+                        baseURL.stopAccessingSecurityScopedResource()
+                    }
+                    finish(error)
+                }
+
+                do {
+                    if let done = try UploadHelper.doneRecord(
+                        fileName: file.lastPathComponent,
+                        base: baseURL
+                    ), UploadHelper.recordMatchesFile(done, fileURL: file) {
+                        return finishOnce(nil)
+                    }
+
+                    let snapshot = try UploadHelper.readStableFile(file)
+                    if let expectedRecord, snapshot.record != expectedRecord {
+                        throw UploadCoreError.fileReadFailed(
+                            "\(file.lastPathComponent): queued file identity changed"
+                        )
+                    }
+                    CustomLogger.log(
+                        "[Upload][Start] dir=\(dirName) file=\(file.lastPathComponent) "
+                            + "bytes=\(snapshot.data.count)"
+                    )
+                    let session = ServerSession.getSession(server: server)
+                    session.uploadFile(
+                        dirName: dirName,
+                        fileName: file.lastPathComponent,
+                        fileBytes: snapshot.data,
+                        fullPath: file.path,
+                        sender: sender,
+                        cancellationToken: cancellationToken
+                    ) { error in
+                        if let error {
+                            CustomLogger.log(
+                                "[Upload][Error] dir=\(dirName) "
+                                    + "file=\(file.lastPathComponent) err=\(error)"
+                            )
+                            return finishOnce(error)
+                        }
+
+                        do {
+                            try UploadHelper.verifyUnchanged(
+                                snapshot,
+                                fileURL: file
+                            )
+                            try UploadHelper.markDone(
+                                record: snapshot.record,
+                                base: baseURL
+                            )
+                            CustomLogger.log(
+                                "[Upload][Success] dir=\(dirName) "
+                                    + "file=\(file.lastPathComponent) "
+                                    + "bytes=\(snapshot.data.count)"
+                            )
+                            finishOnce(nil)
+                        } catch {
+                            let message = error.localizedDescription
+                            CustomLogger.log(
+                                "[Upload][Error] dir=\(dirName) "
+                                    + "file=\(file.lastPathComponent) err=\(message)"
+                            )
+                            finishOnce(message)
+                        }
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    CustomLogger.log(
+                        "[Upload][Error] dir=\(dirName) "
+                            + "file=\(file.lastPathComponent) err=\(message)"
+                    )
+                    finishOnce(message)
+                }
+            },
+            completion: completion
+        )
     }
 }
 
@@ -727,10 +1026,17 @@ final class UploadDirectoriesStore: ObservableObject {
         didSet { persist() }
     }
 
-    private let defaultsKey = "UploadDirectories"
+    private static let defaultsKey = "UploadDirectories"
 
     init() {
         load()
+    }
+
+    static func loadPersisted(
+        defaults: UserDefaults = .standard
+    ) throws -> [UploadDirectory] {
+        guard let data = defaults.data(forKey: defaultsKey) else { return [] }
+        return try JSONDecoder().decode([UploadDirectory].self, from: data)
     }
 
     func add(url: URL) {
@@ -747,6 +1053,7 @@ final class UploadDirectoriesStore: ObservableObject {
             let entry = UploadDirectory(id: UUID(), name: name, bookmark: bookmark)
             if !dirs.contains(where: { $0.bookmark == entry.bookmark }) {
                 dirs.append(entry)
+                ImmediateUploadService.shared.resume()
             }
         } catch {
             CustomLogger.log("[Upload] Failed to create bookmark: \(error)")
@@ -762,20 +1069,17 @@ final class UploadDirectoriesStore: ObservableObject {
     private func persist() {
         do {
             let data = try JSONEncoder().encode(dirs)
-            UserDefaults.standard.set(data, forKey: defaultsKey)
+            UserDefaults.standard.set(data, forKey: Self.defaultsKey)
         } catch {
             CustomLogger.log("[Upload] Persist failed: \(error)")
         }
     }
 
     private func load() {
-        if let data = UserDefaults.standard.data(forKey: defaultsKey) {
-            do {
-                let decoded = try JSONDecoder().decode([UploadDirectory].self, from: data)
-                self.dirs = decoded
-            } catch {
-                CustomLogger.log("[Upload] Load failed: \(error)")
-            }
+        do {
+            dirs = try Self.loadPersisted()
+        } catch {
+            CustomLogger.log("[Upload] Load failed: \(error)")
         }
     }
 }
@@ -806,6 +1110,7 @@ extension DirectoryUploader {
                     server: server,
                     sender: sender,
                     stopOnError: stopOnError,
+                    priority: priority,
                     cancellationToken: cancellationToken,
                     completion: finish
                 )
@@ -819,6 +1124,7 @@ extension DirectoryUploader {
         server: String,
         sender: String,
         stopOnError: Bool,
+        priority: UploadJobPriority,
         cancellationToken: UploadCancellationToken?,
         completion: @escaping (String?) -> Void
     ) {
@@ -833,6 +1139,7 @@ extension DirectoryUploader {
                 server: server,
                 sender: sender,
                 stopOnError: stopOnError,
+                priority: priority,
                 cancellationToken: cancellationToken
             ) { error in
                 if let error {
@@ -854,8 +1161,14 @@ extension DirectoryUploader {
         guard let cfg = getServerAndSender() else {
             return completion("Upload server or sender is not configured")
         }
-        let store = UploadDirectoriesStore()
-        let dirs = store.dirs
+        let dirs: [UploadDirectory]
+        do {
+            dirs = try UploadDirectoriesStore.loadPersisted()
+        } catch {
+            return completion(
+                "Failed to load upload directories: \(error.localizedDescription)"
+            )
+        }
         guard !dirs.isEmpty else { return completion(nil) }
         uploadAllDirectories(
             dirs,

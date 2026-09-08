@@ -777,6 +777,322 @@ final class SensorBagCompatibilityTests: XCTestCase {
         )
     }
 
+    func test_immediateUploadQueue_survivesRelaunchAndPreservesIdentity() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let continuous = documents.appendingPathComponent(
+            "continuous",
+            isDirectory: true
+        )
+        let databaseURL = root.appendingPathComponent(
+            ImmediateUploadQueue.databaseFileName
+        )
+        try fm.createDirectory(at: continuous, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let file = continuous.appendingPathComponent("123.bin")
+        let bytes = Data([1, 2, 3, 4])
+        try bytes.write(to: file, options: .atomic)
+        let enqueuedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let original: PendingImmediateUpload
+        do {
+            let queue = try ImmediateUploadQueue(
+                documentsURL: documents,
+                databaseURL: databaseURL
+            )
+            original = try queue.enqueue(fileURL: file, now: enqueuedAt)
+        }
+
+        let reopened = try ImmediateUploadQueue(
+            documentsURL: documents,
+            databaseURL: databaseURL
+        )
+        XCTAssertEqual(try reopened.allRecords(), [original])
+        XCTAssertEqual(original.relativePath, "continuous/123.bin")
+        XCTAssertEqual(original.record.fileName, "123.bin")
+        XCTAssertEqual(original.record.fileSize, Int64(bytes.count))
+        XCTAssertEqual(original.enqueuedAt, enqueuedAt)
+        XCTAssertEqual(try reopened.fileURL(for: original), file)
+    }
+
+    func test_immediateUploadQueue_failureBacksOffWithoutLosingRecord() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let continuous = documents.appendingPathComponent(
+            "continuous",
+            isDirectory: true
+        )
+        try fm.createDirectory(at: continuous, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let file = continuous.appendingPathComponent("retry.bin")
+        try Data([1]).write(to: file, options: .atomic)
+        let queue = try ImmediateUploadQueue(
+            documentsURL: documents,
+            databaseURL: root.appendingPathComponent("queue.sqlite3")
+        )
+        let start = Date(timeIntervalSinceReferenceDate: 2_000)
+        let pending = try queue.enqueue(fileURL: file, now: start)
+        let failed = try queue.markFailed(
+            relativePath: pending.relativePath,
+            error: "offline",
+            now: start
+        )
+
+        XCTAssertEqual(failed.attemptCount, 1)
+        XCTAssertEqual(failed.lastError, "offline")
+        XCTAssertEqual(failed.nextAttemptAt, start.addingTimeInterval(60))
+        XCTAssertNil(try queue.nextDue(at: start.addingTimeInterval(59)))
+        XCTAssertEqual(
+            try queue.nextDue(at: start.addingTimeInterval(60)),
+            failed
+        )
+
+        let requeued = try queue.enqueue(
+            fileURL: file,
+            now: start.addingTimeInterval(10)
+        )
+        XCTAssertEqual(requeued, failed)
+        try queue.remove(relativePath: pending.relativePath)
+        XCTAssertTrue(try queue.allRecords().isEmpty)
+        XCTAssertEqual(try Data(contentsOf: file), Data([1]))
+    }
+
+    func test_immediateUploadQueue_replacementResetsFailureState() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let continuous = documents.appendingPathComponent(
+            "continuous",
+            isDirectory: true
+        )
+        try fm.createDirectory(at: continuous, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let file = continuous.appendingPathComponent("replacement.bin")
+        try Data([1]).write(to: file, options: .atomic)
+        let queue = try ImmediateUploadQueue(
+            documentsURL: documents,
+            databaseURL: root.appendingPathComponent("queue.sqlite3")
+        )
+        let initial = try queue.enqueue(fileURL: file)
+        _ = try queue.markFailed(
+            relativePath: initial.relativePath,
+            error: "offline"
+        )
+
+        try Data([2, 3]).write(to: file, options: .atomic)
+        let replacement = try queue.enqueue(fileURL: file)
+
+        XCTAssertEqual(replacement.record.fileSize, 2)
+        XCTAssertEqual(replacement.attemptCount, 0)
+        XCTAssertNil(replacement.nextAttemptAt)
+        XCTAssertNil(replacement.lastError)
+    }
+
+    func test_immediateUploadQueue_freshRecordingIsNotStarvedByDueRetry() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let continuous = documents.appendingPathComponent(
+            "continuous",
+            isDirectory: true
+        )
+        try fm.createDirectory(at: continuous, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let queue = try ImmediateUploadQueue(
+            documentsURL: documents,
+            databaseURL: root.appendingPathComponent("queue.sqlite3")
+        )
+        let start = Date(timeIntervalSinceReferenceDate: 4_000)
+        let olderFile = continuous.appendingPathComponent("older.bin")
+        try Data([1]).write(to: olderFile, options: .atomic)
+        let older = try queue.enqueue(fileURL: olderFile, now: start)
+        _ = try queue.markFailed(
+            relativePath: older.relativePath,
+            error: "permanent local error",
+            now: start
+        )
+
+        let newerFile = continuous.appendingPathComponent("newer.bin")
+        try Data([2]).write(to: newerFile, options: .atomic)
+        let newer = try queue.enqueue(
+            fileURL: newerFile,
+            now: start.addingTimeInterval(120)
+        )
+
+        XCTAssertEqual(
+            try queue.nextDue(at: start.addingTimeInterval(120)),
+            newer
+        )
+    }
+
+    func test_immediateUploadQueue_rejectsFilesOutsideDocuments() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        try fm.createDirectory(at: documents, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let outside = root.appendingPathComponent("outside.bin")
+        try Data([1]).write(to: outside)
+        let queue = try ImmediateUploadQueue(
+            documentsURL: documents,
+            databaseURL: root.appendingPathComponent("queue.sqlite3")
+        )
+
+        XCTAssertThrowsError(try queue.enqueue(fileURL: outside)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("outside"))
+        }
+        XCTAssertTrue(try queue.allRecords().isEmpty)
+    }
+
+    func test_immediateUploadQueue_corruptDatabaseFailsExplicitly() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        try fm.createDirectory(at: documents, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let databaseURL = root.appendingPathComponent("queue.sqlite3")
+        try Data("not-sqlite".utf8).write(to: databaseURL)
+
+        XCTAssertThrowsError(
+            try ImmediateUploadQueue(
+                documentsURL: documents,
+                databaseURL: databaseURL
+            )
+        ) { error in
+            XCTAssertTrue(
+                error.localizedDescription.contains("Immediate-upload queue")
+            )
+        }
+        XCTAssertEqual(
+            try Data(contentsOf: databaseURL),
+            Data("not-sqlite".utf8)
+        )
+    }
+
+    func test_uploadStableSnapshot_detectsAtomicReplacement() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let file = root.appendingPathComponent("stable.bin")
+        try Data([1, 2, 3]).write(to: file, options: .atomic)
+        let snapshot = try UploadHelper.readStableFile(file)
+
+        try Data([4, 5, 6]).write(to: file, options: .atomic)
+
+        XCTAssertThrowsError(
+            try UploadHelper.verifyUnchanged(snapshot, fileURL: file)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("changed"))
+        }
+    }
+
+    func test_uploadCompletionIndex_pointLookupUsesCapturedRecord() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let record = UploadDoneRecord(
+            fileName: "captured.bin",
+            fileSize: 42,
+            lastModifiedAt: Date(timeIntervalSinceReferenceDate: 3_000)
+        )
+
+        try UploadHelper.markDone(record: record, base: root)
+
+        XCTAssertEqual(
+            try UploadHelper.doneRecord(fileName: record.fileName, base: root),
+            record
+        )
+        XCTAssertNil(
+            try UploadHelper.doneRecord(fileName: "missing.bin", base: root)
+        )
+    }
+
+    func test_uploadFileCoordinator_prioritizesImmediateAndCoalescesFile() {
+        let coordinator = UploadFileCoordinator()
+        let activeStarted = expectation(description: "active transfer started")
+        let completions = expectation(description: "all transfers completed")
+        completions.expectedFulfillmentCount = 4
+        let releaseActive = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var order: [String] = []
+        var duplicateOperationCount = 0
+
+        coordinator.submit(
+            key: "active",
+            priority: .background,
+            operation: { finish in
+                lock.lock()
+                order.append("active")
+                lock.unlock()
+                activeStarted.fulfill()
+                releaseActive.wait()
+                finish(nil)
+            }
+        ) { _ in completions.fulfill() }
+        wait(for: [activeStarted], timeout: 1)
+
+        coordinator.submit(
+            key: "backlog",
+            priority: .background,
+            operation: { finish in
+                lock.lock()
+                order.append("backlog")
+                lock.unlock()
+                finish(nil)
+            }
+        ) { _ in completions.fulfill() }
+        coordinator.submit(
+            key: "new-recording",
+            priority: .immediate,
+            operation: { finish in
+                lock.lock()
+                order.append("immediate")
+                duplicateOperationCount += 1
+                lock.unlock()
+                finish(nil)
+            }
+        ) { _ in completions.fulfill() }
+        coordinator.submit(
+            key: "new-recording",
+            priority: .immediate,
+            operation: { finish in
+                lock.lock()
+                duplicateOperationCount += 1
+                lock.unlock()
+                finish(nil)
+            }
+        ) { _ in completions.fulfill() }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + 0.05
+        ) {
+            releaseActive.signal()
+        }
+        wait(for: [completions], timeout: 2)
+
+        lock.lock()
+        let finalOrder = order
+        let finalDuplicateCount = duplicateOperationCount
+        lock.unlock()
+        XCTAssertEqual(finalOrder, ["active", "immediate", "backlog"])
+        XCTAssertEqual(finalDuplicateCount, 1)
+    }
+
     func test_sensorBagBackfillIndex_migratesVerifiedLegacyJSON() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory

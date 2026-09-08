@@ -104,6 +104,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         scheduleAppRefreshTask()
         scheduleProcessingTask()
 
+        ImmediateUploadService.shared.resume { error in
+            if let error {
+                CustomLogger.log(
+                    "[App][ImmediateUpload][Error] Resume failed: \(error)"
+                )
+            }
+        }
+
         UNUserNotificationCenter.current().delegate = self
 
         return true

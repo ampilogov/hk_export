@@ -44,6 +44,33 @@ final class UploadCompletionIndex {
         }
     }
 
+    @discardableResult
+    static func markDone(
+        record: UploadDoneRecord,
+        in baseURL: URL
+    ) throws -> UploadDoneRecord {
+        try withCoordinatedIndex(
+            in: baseURL,
+            migrateLegacyRecords: true,
+            shouldCancel: { false }
+        ) {
+            try $0.markDone(record: record)
+        }
+    }
+
+    static func record(
+        fileName: String,
+        in baseURL: URL
+    ) throws -> UploadDoneRecord? {
+        try withCoordinatedIndex(
+            in: baseURL,
+            migrateLegacyRecords: true,
+            shouldCancel: { false }
+        ) {
+            try $0.record(fileName: fileName)
+        }
+    }
+
     static func reset(in baseURL: URL) throws -> Int {
         try withCoordinatedIndex(
             in: baseURL,
@@ -227,12 +254,59 @@ final class UploadCompletionIndex {
         }
     }
 
+    private func record(fileName: String) throws -> UploadDoneRecord? {
+        let statement = try prepare(
+            """
+            SELECT file_name, file_size, modified_at
+            FROM completed_uploads
+            WHERE file_name = ?;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_bind_text(
+            statement,
+            1,
+            fileName,
+            -1,
+            sqliteTransientDestructor
+        ) == SQLITE_OK else {
+            throw databaseError(operation: "bind completion-index lookup")
+        }
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE {
+            return nil
+        }
+        guard result == SQLITE_ROW,
+              let fileNameBytes = sqlite3_column_text(statement, 0) else {
+            throw databaseError(operation: "read completion-index lookup")
+        }
+        let record = UploadDoneRecord(
+            fileName: String(cString: fileNameBytes),
+            fileSize: sqlite3_column_int64(statement, 1),
+            lastModifiedAt: Date(
+                timeIntervalSinceReferenceDate: sqlite3_column_double(
+                    statement,
+                    2
+                )
+            )
+        )
+        guard !record.fileName.isEmpty,
+              record.fileSize >= 0,
+              record.lastModifiedAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw UploadCoreError.completionState(
+                "Completion index contains an invalid record for \(fileName)"
+            )
+        }
+        return record
+    }
+
     @discardableResult
     func markDone(file: URL) throws -> UploadDoneRecord {
-        let values: URLResourceValues
+        let attributes: [FileAttributeKey: Any]
         do {
-            values = try file.resourceValues(
-                forKeys: [.fileSizeKey, .contentModificationDateKey]
+            attributes = try FileManager.default.attributesOfItem(
+                atPath: file.path
             )
         } catch {
             throw UploadCoreError.completionState(
@@ -240,18 +314,31 @@ final class UploadCompletionIndex {
                     + error.localizedDescription
             )
         }
-        guard let fileSize = values.fileSize,
-              let modifiedAt = values.contentModificationDate else {
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              let fileSize = (attributes[.size] as? NSNumber)?.int64Value,
+              let modifiedAt = attributes[.modificationDate] as? Date else {
             throw UploadCoreError.completionState(
-                "Missing size or modification date for \(file.lastPathComponent)"
+                "Not a regular file or missing metadata for \(file.lastPathComponent)"
             )
         }
 
         let record = UploadDoneRecord(
             fileName: file.lastPathComponent,
-            fileSize: Int64(fileSize),
+            fileSize: fileSize,
             lastModifiedAt: modifiedAt
         )
+        return try markDone(record: record)
+    }
+
+    @discardableResult
+    private func markDone(record: UploadDoneRecord) throws -> UploadDoneRecord {
+        guard !record.fileName.isEmpty,
+              record.fileSize >= 0,
+              record.lastModifiedAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw UploadCoreError.completionState(
+                "Invalid completion record for \(record.fileName)"
+            )
+        }
         try performTransaction {
             try upsert([record])
         }
