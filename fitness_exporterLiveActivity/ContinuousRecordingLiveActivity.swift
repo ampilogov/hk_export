@@ -65,9 +65,9 @@ struct ContinuousRecordingLiveActivity: Widget {
     }
 
     private static func fmt(_ date: Date?) -> String {
-        guard let d = date else { return "--" }
-        let s = max(0, Int(Date().timeIntervalSince(d)))
-        return "\(s)s"
+        guard let date else { return "--" }
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        return "\(seconds)s"
     }
 
     private static func elapsed(_ seconds: Int) -> String {
@@ -77,7 +77,9 @@ struct ContinuousRecordingLiveActivity: Widget {
         return String(format: "%02d:%02d", mm, ss)
     }
 
-    private static func maxStaleness(_ state: ContinuousRecordingAttributes.ContentState) -> String {
+    private static func maxStaleness(
+        _ state: ContinuousRecordingAttributes.ContentState
+    ) -> String {
         let now = Date()
         let ages = [state.lastRR, state.lastECG, state.lastACC]
             .compactMap { $0 }
@@ -86,7 +88,9 @@ struct ContinuousRecordingLiveActivity: Widget {
         return "\(maxAge)s"
     }
 
-    private static func maxStalenessShort(_ state: ContinuousRecordingAttributes.ContentState) -> String {
+    private static func maxStalenessShort(
+        _ state: ContinuousRecordingAttributes.ContentState
+    ) -> String {
         let now = Date()
         let ages = [state.lastRR, state.lastECG, state.lastACC]
             .compactMap { $0 }

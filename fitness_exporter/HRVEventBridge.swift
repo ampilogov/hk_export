@@ -4,15 +4,14 @@ import Foundation
 /// Bridges BluetoothManager sensor events to UI-friendly published values
 /// and maintains the RR-interval graph model. Subscribes once.
 final class HRVEventBridge: ObservableObject {
-    private struct RRPacket {
-        let intervals: [Double]
-        let packageTime: Date
-    }
-
     private static let presentationUpdateInterval: TimeInterval = 1
 
     @Published var rawHR: Int = 0
     @Published var derivedHR: Int = 0
+    @Published private(set) var lastRR: Date?
+    @Published private(set) var lastECG: Date?
+    @Published private(set) var lastACC: Date?
+    @Published private(set) var recentECGPoints: [ECGPlotPoint] = []
     let graphModel = RRIntervalGraphModel()
 
     private var subscriptions = Set<AnyCancellable>()
@@ -20,10 +19,15 @@ final class HRVEventBridge: ObservableObject {
         label: "com.fitness_exporter.hrvPresentation",
         qos: .utility
     )
-    private var recentPackets: [RRPacket] = []
-    private var pendingPackets: [RRPacket] = []
+    private var recentGraphSampleBuffer: [RRIntervalGraphModel.Sample] = []
+    private var pendingGraphSamples: [RRIntervalGraphModel.Sample] = []
+    private var beatTimeline = RRBeatTimelineReconstructor()
+    private var recentECGPointBuffer: [ECGPlotPoint] = []
     private var latestRawHR = 0
     private var latestDerivedHR = 0
+    private var latestRR: Date?
+    private var latestECG: Date?
+    private var latestACC: Date?
     private var presentationActive = false
     private var needsFullSnapshot = true
     private var presentationUpdateScheduled = false
@@ -42,49 +46,69 @@ final class HRVEventBridge: ObservableObject {
             guard let self else { return }
             guard self.presentationActive != active else { return }
             self.presentationActive = active
-            self.pendingPackets.removeAll(keepingCapacity: true)
+            self.pendingGraphSamples.removeAll(keepingCapacity: true)
             self.needsFullSnapshot = true
             if active {
-                self.schedulePresentationUpdateIfNeeded()
+                self.publishPresentationUpdate()
             }
         }
     }
 
-    func resetGraph() {
+    /// Clear only the plotted RR-derived heart-rate history. Sensor streaming,
+    /// current heart rate, and the live ECG buffer continue uninterrupted.
+    func clearHeartRateGraph() {
         processingQueue.async { [weak self] in
             guard let self else { return }
-            self.recentPackets.removeAll()
-            self.pendingPackets.removeAll()
-            self.latestRawHR = 0
-            self.latestDerivedHR = 0
+            self.recentGraphSampleBuffer.removeAll()
+            self.pendingGraphSamples.removeAll()
+            self.beatTimeline.reset()
             self.needsFullSnapshot = true
             DispatchQueue.main.async { [weak self] in
-                self?.rawHR = 0
-                self?.derivedHR = 0
                 self?.graphModel.reset()
             }
         }
     }
 
     private func process(_ event: SensorEvent) {
-        guard case .hrSamples(let samples) = event.data else { return }
-
-        if let sample = samples.samples.last {
-            latestRawHR = sample.value
-            if let last = sample.rrIntervals.last, last > 0 {
-                latestDerivedHR = Int((60.0 / last).rounded())
+        switch event.data {
+        case .hrSamples(let samples):
+            if let sample = samples.samples.last {
+                latestRawHR = sample.value
+                if let last = sample.rrIntervals.last, last > 0 {
+                    latestDerivedHR = Int((60.0 / last).rounded())
+                }
             }
-        }
 
-        let intervals = samples.samples.flatMap { $0.rrIntervals }
-        if !intervals.isEmpty {
-            let packet = RRPacket(intervals: intervals, packageTime: event.timestamp)
-            recentPackets.append(packet)
-            if presentationActive {
-                pendingPackets.append(packet)
+            let intervals = samples.samples.flatMap { $0.rrIntervals }
+            if !intervals.isEmpty {
+                latestRR = event.timestamp
+                let newGraphSamples = beatTimeline.append(
+                    intervals: intervals,
+                    receivedAt: event.timestamp
+                )
+                recentGraphSampleBuffer.append(contentsOf: newGraphSamples)
+                if presentationActive {
+                    pendingGraphSamples.append(contentsOf: newGraphSamples)
+                }
+                let cutoff = event.timestamp.addingTimeInterval(-graphModel.window)
+                recentGraphSampleBuffer.removeAll { $0.received < cutoff }
             }
+
+        case .ecgSamples(let samples):
+            guard !samples.samples.isEmpty else { return }
+            latestECG = event.timestamp
+            let newPoints = SensorBagPersistence.ecgPoints(from: event)
+            guard !newPoints.isEmpty else { return }
+            recentECGPointBuffer.append(contentsOf: newPoints)
             let cutoff = event.timestamp.addingTimeInterval(-graphModel.window)
-            recentPackets.removeAll { $0.packageTime < cutoff }
+            recentECGPointBuffer.removeAll { $0.timestamp < cutoff }
+
+        case .accSamples(let samples):
+            guard !samples.samples.isEmpty else { return }
+            latestACC = event.timestamp
+
+        case .battery, .hrvStage, .location, .custom:
+            return
         }
 
         if presentationActive {
@@ -101,54 +125,46 @@ final class HRVEventBridge: ObservableObject {
             guard let self else { return }
             self.presentationUpdateScheduled = false
             guard self.presentationActive else { return }
-
-            let replace = self.needsFullSnapshot
-            let packets = replace ? self.recentPackets : self.pendingPackets
-            self.pendingPackets.removeAll(keepingCapacity: true)
-            self.needsFullSnapshot = false
-            let graphSamples = Self.makeGraphSamples(from: packets)
-            let lastPackageTime = packets.last?.packageTime
-            let rawHR = self.latestRawHR
-            let derivedHR = self.latestDerivedHR
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.rawHR = rawHR
-                self.derivedHR = derivedHR
-                if replace {
-                    self.graphModel.replace(
-                        samples: graphSamples,
-                        lastPackageTime: lastPackageTime
-                    )
-                } else if !graphSamples.isEmpty {
-                    self.graphModel.append(
-                        samples: graphSamples,
-                        lastPackageTime: lastPackageTime
-                    )
-                }
-            }
+            self.publishPresentationUpdate()
         }
     }
 
-    private static func makeGraphSamples(
-        from packets: [RRPacket]
-    ) -> [RRIntervalGraphModel.Sample] {
-        var graphSamples: [RRIntervalGraphModel.Sample] = []
-        graphSamples.reserveCapacity(
-            packets.reduce(0) { $0 + $1.intervals.count }
-        )
-        for packet in packets {
-            var inferredPackageTime = packet.packageTime
-            for rr in packet.intervals.reversed() {
-                graphSamples.append(
-                    RRIntervalGraphModel.Sample(
-                        rr: rr,
-                        received: inferredPackageTime
-                    )
+    private func publishPresentationUpdate() {
+        dispatchPrecondition(condition: .onQueue(processingQueue))
+        guard presentationActive else { return }
+
+        let replace = needsFullSnapshot
+        let graphSamples = replace ? recentGraphSampleBuffer : pendingGraphSamples
+        pendingGraphSamples.removeAll(keepingCapacity: true)
+        needsFullSnapshot = false
+        let lastPackageTime = latestRR
+        let rawHR = latestRawHR
+        let derivedHR = latestDerivedHR
+        let lastRR = latestRR
+        let lastECG = latestECG
+        let lastACC = latestACC
+        let recentECGPoints = recentECGPointBuffer
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.rawHR = rawHR
+            self.derivedHR = derivedHR
+            self.lastRR = lastRR
+            self.lastECG = lastECG
+            self.lastACC = lastACC
+            self.recentECGPoints = recentECGPoints
+            if replace {
+                self.graphModel.replace(
+                    samples: graphSamples,
+                    lastPackageTime: lastPackageTime
                 )
-                inferredPackageTime -= rr
+            } else if !graphSamples.isEmpty {
+                self.graphModel.append(
+                    samples: graphSamples,
+                    lastPackageTime: lastPackageTime
+                )
             }
         }
-        return graphSamples
     }
+
 }

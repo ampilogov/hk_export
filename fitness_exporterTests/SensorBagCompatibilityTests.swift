@@ -96,6 +96,138 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(offsets[2], 0, accuracy: 0.000_001)
     }
 
+    func test_liveECGPoints_useTheSameWallClockMappingAsSavedData() {
+        let receivedAt = Date(timeIntervalSince1970: 100)
+        let event = SensorEvent(
+            timestamp: receivedAt,
+            data: .ecgSamples(
+                ECGSamples(
+                    samples: [
+                        ECGSample(timestamp: 1_000_000_000, voltage: -12),
+                        ECGSample(timestamp: 1_008_000_000, voltage: 34),
+                    ]
+                )
+            )
+        )
+
+        let points = SensorBagPersistence.ecgPoints(from: event)
+
+        XCTAssertEqual(points.map(\.voltage), [-12, 34])
+        XCTAssertEqual(
+            points[0].timestamp.timeIntervalSince(receivedAt),
+            -0.008,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            points[1].timestamp.timeIntervalSince(receivedAt),
+            0,
+            accuracy: 0.000_001
+        )
+    }
+
+    func test_heartRateGraphScale_convertsRRSecondsToBeatsPerMinute() {
+        XCTAssertEqual(HeartRateGraphScale.beatsPerMinute(forRR: 1), 60)
+        XCTAssertEqual(HeartRateGraphScale.beatsPerMinute(forRR: 0.5), 120)
+        XCTAssertNil(HeartRateGraphScale.beatsPerMinute(forRR: 0))
+        XCTAssertNil(HeartRateGraphScale.beatsPerMinute(forRR: .infinity))
+        XCTAssertEqual(
+            HeartRateGraphScale.axisTicks(minimum: 47, maximum: 113),
+            [60, 80, 100]
+        )
+
+        let normalValues = Array(repeating: 70.0, count: 20) + [240]
+        let displayRange = HeartRateGraphScale.displayRange(for: normalValues)
+        XCTAssertLessThan(displayRange.upperBound, 240)
+        XCTAssertTrue(displayRange.contains(70))
+    }
+
+    func test_heartRateGraphSamples_sortAndUseNewestDuplicateTimestamp() {
+        let base = Date(timeIntervalSince1970: 1_000)
+        let samples = [
+            RRIntervalGraphModel.Sample(rr: 1.0, received: base.addingTimeInterval(2)),
+            RRIntervalGraphModel.Sample(rr: 0.9, received: base),
+            RRIntervalGraphModel.Sample(rr: 0.8, received: base.addingTimeInterval(1)),
+            RRIntervalGraphModel.Sample(rr: 0.7, received: base.addingTimeInterval(1))
+        ]
+
+        let normalized = RRIntervalGraphModel.chronologicalSamples(samples)
+
+        XCTAssertEqual(normalized.map(\.received), [
+            base,
+            base.addingTimeInterval(1),
+            base.addingTimeInterval(2)
+        ])
+        XCTAssertEqual(normalized.map(\.rr), [0.9, 0.7, 1.0])
+    }
+
+    func test_signalTimeline_limitsHistoryAndECGRenderingRange() {
+        XCTAssertEqual(SignalTimelineScale.clampedDuration(1), 2)
+        XCTAssertEqual(SignalTimelineScale.clampedDuration(30), 30)
+        XCTAssertEqual(SignalTimelineScale.clampedDuration(600), 300)
+        XCTAssertTrue(SignalTimelineScale.shouldRenderECG(visibleDuration: 30))
+        XCTAssertTrue(SignalTimelineScale.shouldRenderECG(visibleDuration: 60))
+        XCTAssertFalse(SignalTimelineScale.shouldRenderECG(visibleDuration: 61))
+
+        let start = Date(timeIntervalSince1970: 120)
+        let ticks = SignalTimelineScale.timeTicks(
+            in: start...start.addingTimeInterval(30)
+        )
+        XCTAssertTrue((3...5).contains(ticks.count))
+    }
+
+    func test_rrBeatTimeline_usesRRSpacingInsteadOfBluetoothArrivalJitter() {
+        let base = Date(timeIntervalSince1970: 1_000)
+        var timeline = RRBeatTimelineReconstructor()
+
+        let first = timeline.append(intervals: [1], receivedAt: base)
+        let second = timeline.append(
+            intervals: [1, 0.8],
+            receivedAt: base.addingTimeInterval(2.4)
+        )
+        let samples = first + second
+
+        XCTAssertEqual(samples.count, 3)
+        XCTAssertEqual(
+            samples[1].received.timeIntervalSince(samples[0].received),
+            1,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            samples[2].received.timeIntervalSince(samples[1].received),
+            0.8,
+            accuracy: 0.000_001
+        )
+        XCTAssertFalse(samples[1].beginsNewSegment)
+        XCTAssertFalse(samples[2].beginsNewSegment)
+    }
+
+    func test_rrBeatTimeline_breaksTheLineAfterAGenuineStreamGap() {
+        let base = Date(timeIntervalSince1970: 1_000)
+        var timeline = RRBeatTimelineReconstructor()
+        _ = timeline.append(intervals: [1], receivedAt: base)
+
+        let afterGap = timeline.append(
+            intervals: [1],
+            receivedAt: base.addingTimeInterval(10)
+        )
+
+        XCTAssertEqual(afterGap.count, 1)
+        XCTAssertEqual(afterGap[0].received, base.addingTimeInterval(10))
+        XCTAssertTrue(afterGap[0].beginsNewSegment)
+    }
+
+    func test_orthostaticRecording_discardsOnlyShortManualStops() {
+        XCTAssertTrue(
+            OrthostaticHRV.shouldDiscard(reason: .user, elapsed: 9.999)
+        )
+        XCTAssertFalse(
+            OrthostaticHRV.shouldDiscard(reason: .user, elapsed: 10)
+        )
+        XCTAssertFalse(
+            OrthostaticHRV.shouldDiscard(reason: .timer, elapsed: 2)
+        )
+    }
+
     func test_ECGWindow_loadsAcrossFinalizedFilesAndPreservesBytes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

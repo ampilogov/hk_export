@@ -23,11 +23,6 @@ private class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-private struct ECGSelection: Identifiable {
-    let id = UUID()
-    let timestamp: Date
-}
-
 struct HRVView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Binding var isProcessing: Bool
@@ -35,8 +30,6 @@ struct HRVView: View {
     @ObservedObject private var manager: BluetoothManager
     @ObservedObject private var continuousRecorder: ContinuousRecorder
     @State private var subscriptions = Set<AnyCancellable>()
-    @State private var derivedHR: Int = 0
-    @State private var rawHR: Int = 0
     @State private var orthoTester: OrthostaticHRV?
     @State private var timer: Timer?
     /// Timer for repeating haptic reminders to stand until user action
@@ -56,7 +49,10 @@ struct HRVView: View {
     @State private var showCustomEventSheet: Bool = false
     @State private var customEventText: String = ""
     @State private var customEventTimestamp: Date?
-    @State private var selectedECG: ECGSelection?
+    @State private var orthostaticMetrics: [HRVStage: StageMetrics]?
+    @State private var showModeSettings = false
+    @State private var showResults = false
+    @State private var statusNotice: String?
     @State private var isViewVisible = false
     @State private var hasInitializedView = false
     
@@ -125,227 +121,22 @@ struct HRVView: View {
     }
     
     var body: some View {
-        VStack(spacing: 16) {
-            if connectionPhase == .notConnected {
-                VStack(spacing: 12) {
-                    if !manager.rememberedDevices.isEmpty {
-                        VStack(spacing: 8) {
-                            HStack {
-                                Text("Remembered Devices")
-                                    .font(.headline)
-                                Spacer()
-                            }
-                            ScrollView {
-                                VStack(spacing: 8) {
-                                    ForEach(manager.rememberedDevices) { device in
-                                        HStack(spacing: 12) {
-                                            Text(device.name ?? device.id)
-                                            Spacer()
-                                            Button("Connect") {
-                                                manager.connect(to: device)
-                                            }
-                                            Button("Delete", role: .destructive) {
-                                                deleteRememberedDevice(device)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 160)
-                        }
-                    }
-
-                    if manager.isScanning {
-                        VStack(spacing: 8) {
-                            HStack {
-                                Button("Stop Scan") { manager.stopScan() }
-                                Spacer()
-                            }
-                            ScrollView {
-                                VStack(spacing: 8) {
-                                    ForEach(unrememberedDiscoveredDevices, id: \.identifier) { device in
-                                        HStack {
-                                            Text(device.name ?? device.identifier.uuidString)
-                                            Spacer()
-                                            Button("Connect") {
-                                                manager.connect(to: device)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Button("Scan Devices") { manager.scanForDevices() }
-                    }
-                }
-            } else if connectionPhase == .connected {
-                VStack(spacing: 8) {
-                    Text(deviceSummary)
-                    if !manager.isReadyForRecording {
-                        Text("Waiting for required sensor streams…")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Spacer()
-                        Button("Start Recording") {
-                            connectionPhase = .recording
-                            isProcessing = true
-                            startRecording()
-                        }
-                        .disabled(!manager.isReadyForRecording || isProcessing)
-                        Button("Disconnect") {
-                            manager.disconnect()
-                            connectionPhase = .notConnected
-                            UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.LAST_HRV_DEVICE)
-                        }
-                    }
-                }
-            } else if connectionPhase == .recording {
-                VStack(spacing: 8) {
-                    Text(deviceSummary)
-                    HStack {
-                        Spacer()
-                        Button("Stop Recording") { showStopRecordingConfirm = true }
-                    }
-                    if selectedMode == .orthostatic {
-                        if !manager.isReadyForRecording {
-                            Text(
-                                manager.isConnected
-                                    ? "Recovering Polar sensor streams…"
-                                    : "Polar disconnected — test remains active while reconnecting…"
-                            )
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                        }
-                        if orthoUIPhase == .transition {
-                            Button("Start Standing") {
-                                orthoTester?.startStanding()
-                            }
-                        } else {
-                            Text("\(orthoPhaseName): \(formatElapsed(elapsedSeconds))")
-                                .font(.headline)
-                        }
-                    } else {
-                        VStack {
-                            if let interruption = continuousRecorder.interruptionMessage {
-                                Text("Recovering: \(interruption)")
-                                    .font(.headline)
-                                    .foregroundColor(.orange)
-                            } else if !manager.isReadyForRecording {
-                                Text("Starting Polar sensor streams…")
-                                    .font(.headline)
-                                    .foregroundColor(.secondary)
-                            }
-                            Text("RR: \(formatLast(continuousRecorder.lastRR))")
-                            Text("ECG: \(formatLast(continuousRecorder.lastECG))")
-                            Text("ACC: \(formatLast(continuousRecorder.lastACC))")
-                            Text("Elapsed: \(formatElapsed(elapsedSeconds))")
-                                .font(.headline)
-                            HStack {
-                                Spacer()
-                                Button("Add Event") {
-                                    // Capture click time for accurate timestamping
-                                    customEventTimestamp = Date()
-                                    showCustomEventSheet = true
-                                }
-                            }
-                            // Surface Live Activity availability for troubleshooting
-                            if !liveActivityEnabledOnDevice {
-                                Text("Live Activity unavailable — enable capability and widget")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-            if connectionPhase != .notConnected {
-                Picker("Mode", selection: $selectedMode) {
-                    ForEach(Mode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                .disabled(connectionPhase == .recording)
-                
-                if selectedMode == .orthostatic {
-                    VStack(spacing: 8) {
-                        Stepper(
-                            onIncrement: { stepDuration(&warmupDurationSeconds, up: true) },
-                            onDecrement: { stepDuration(&warmupDurationSeconds, up: false) },
-                            label: { Text("Warmup Duration: \(formatDuration(warmupDurationSeconds))") }
-                        )
-                        Stepper(
-                            onIncrement: { stepDuration(&layingDurationSeconds, up: true) },
-                            onDecrement: { stepDuration(&layingDurationSeconds, up: false) },
-                            label: { Text("Laying Duration: \(formatDuration(layingDurationSeconds))") }
-                        )
-                        Stepper(
-                            onIncrement: { stepDuration(&standingDurationSeconds, up: true) },
-                            onDecrement: { stepDuration(&standingDurationSeconds, up: false) },
-                            label: { Text("Standing Duration: \(formatDuration(standingDurationSeconds))") }
-                        )
-                    }
-                    .disabled(connectionPhase == .recording)
+        ZStack {
+            recordingBackground.ignoresSafeArea()
+            VStack(spacing: 12) {
+                if connectionPhase == .notConnected {
+                    disconnectedContent
                 } else {
-                    VStack(spacing: 8) {
-                        Stepper(
-                            onIncrement: {
-                                stepDuration(&recordingDurationSeconds, up: true)
-                                if recordingDurationSeconds > recordingIntervalSeconds {
-                                    recordingIntervalSeconds = recordingDurationSeconds
-                                }
-                            },
-                            onDecrement: {
-                                stepDuration(&recordingDurationSeconds, up: false)
-                            },
-                            label: { Text("Recording Duration: \(formatDuration(recordingDurationSeconds))") }
-                        )
-                        Stepper(
-                            onIncrement: { stepDuration(&recordingIntervalSeconds, up: true) },
-                            onDecrement: {
-                                stepDuration(&recordingIntervalSeconds, up: false)
-                                if recordingIntervalSeconds < recordingDurationSeconds {
-                                    recordingDurationSeconds = recordingIntervalSeconds
-                                }
-                            },
-                            label: { Text("Record Every: \(formatDuration(recordingIntervalSeconds))") }
-                        )
-                    }
-                    .disabled(connectionPhase == .recording)
-
+                    connectedHeader
+                    modeControls
+                    recordingStatusContent
+                    orthostaticResultContent
+                    SynchronizedSignalGraphs(eventBridge: eventBridge)
                 }
             }
-            
-            // Console output area for orthostatic results
-            if selectedMode == .orthostatic {
-                ScrollView([.vertical, .horizontal]) {
-                    Text(consoleText)
-                        .font(.system(.footnote, design: .monospaced))
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(UIColor.secondarySystemBackground))
-                .cornerRadius(8)
-            }
-            Spacer()
-            if connectionPhase != .notConnected {
-                RRIntervalGraph(model: eventBridge.graphModel) { timestamp in
-                    guard selectedMode == .continuous else { return }
-                    selectedECG = ECGSelection(timestamp: timestamp)
-                }
-                    .frame(height: 200)
-                if selectedMode == .continuous {
-                    Text("Tap an RR point to inspect its ECG neighborhood.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
+            .padding()
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .padding()
         .navigationTitle("HRV")
         .onAppear {
             if let activeRecording {
@@ -376,7 +167,6 @@ struct HRVView: View {
                             return
                         }
                         connectionPhase = .notConnected
-                        eventBridge.resetGraph()
                     }
                     .store(in: &subscriptions)
                 manager.$isConnected
@@ -519,14 +309,371 @@ struct HRVView: View {
             .padding()
             .presentationDetents([.medium])
         }
-        .sheet(item: $selectedECG) { selection in
-            ECGDetailView(centeredAt: selection.timestamp) { completion in
-                continuousRecorder.loadECGWindow(
-                    centeredAt: selection.timestamp,
-                    completion: completion
-                )
+        .sheet(isPresented: $showModeSettings) {
+            NavigationStack {
+                Form {
+                    if selectedMode == .orthostatic {
+                        Section("Orthostatic Protocol") {
+                            Stepper(
+                                "Warmup: \(formatDuration(warmupDurationSeconds))",
+                                onIncrement: {
+                                    stepDuration(&warmupDurationSeconds, up: true)
+                                },
+                                onDecrement: {
+                                    stepDuration(&warmupDurationSeconds, up: false)
+                                }
+                            )
+                            Stepper(
+                                "Laying: \(formatDuration(layingDurationSeconds))",
+                                onIncrement: {
+                                    stepDuration(&layingDurationSeconds, up: true)
+                                },
+                                onDecrement: {
+                                    stepDuration(&layingDurationSeconds, up: false)
+                                }
+                            )
+                            Stepper(
+                                "Standing: \(formatDuration(standingDurationSeconds))",
+                                onIncrement: {
+                                    stepDuration(&standingDurationSeconds, up: true)
+                                },
+                                onDecrement: {
+                                    stepDuration(&standingDurationSeconds, up: false)
+                                }
+                            )
+                        }
+                    } else {
+                        Section("Continuous Schedule") {
+                            Stepper(
+                                "Record: \(formatDuration(recordingDurationSeconds))",
+                                onIncrement: {
+                                    stepDuration(&recordingDurationSeconds, up: true)
+                                    if recordingDurationSeconds > recordingIntervalSeconds {
+                                        recordingIntervalSeconds = recordingDurationSeconds
+                                    }
+                                },
+                                onDecrement: {
+                                    stepDuration(&recordingDurationSeconds, up: false)
+                                }
+                            )
+                            Stepper(
+                                "Every: \(formatDuration(recordingIntervalSeconds))",
+                                onIncrement: {
+                                    stepDuration(&recordingIntervalSeconds, up: true)
+                                },
+                                onDecrement: {
+                                    stepDuration(&recordingIntervalSeconds, up: false)
+                                    if recordingIntervalSeconds < recordingDurationSeconds {
+                                        recordingDurationSeconds = recordingIntervalSeconds
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                .navigationTitle("Recording Settings")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showModeSettings = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showResults) {
+            NavigationStack {
+                ScrollView([.vertical, .horizontal]) {
+                    Text(consoleText)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .navigationTitle("Orthostatic Results")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Copy") {
+                            UIPasteboard.general.string = consoleText
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showResults = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+    }
+
+    @ViewBuilder
+    private var disconnectedContent: some View {
+        VStack(spacing: 12) {
+            if !manager.rememberedDevices.isEmpty {
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Remembered Devices")
+                            .font(.headline)
+                        Spacer()
+                    }
+                    ForEach(manager.rememberedDevices) { device in
+                        HStack(spacing: 12) {
+                            Text(device.name ?? device.id)
+                            Spacer()
+                            Button("Connect") {
+                                manager.connect(to: device)
+                            }
+                            Button("Delete", role: .destructive) {
+                                deleteRememberedDevice(device)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if manager.isScanning {
+                HStack {
+                    Button("Stop Scan") { manager.stopScan() }
+                    Spacer()
+                }
+                ForEach(unrememberedDiscoveredDevices, id: \.identifier) { device in
+                    HStack {
+                        Text(device.name ?? device.identifier.uuidString)
+                        Spacer()
+                        Button("Connect") {
+                            manager.connect(to: device)
+                        }
+                    }
+                }
+            } else {
+                Button("Scan Devices") { manager.scanForDevices() }
             }
         }
+    }
+
+    private var connectedHeader: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text(deviceSummary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer()
+                if connectionPhase != .recording {
+                    Button(role: .destructive) {
+                        manager.disconnect()
+                        connectionPhase = .notConnected
+                        UserDefaults.standard.removeObject(
+                            forKey: UserDefaultsKeys.LAST_HRV_DEVICE
+                        )
+                    } label: {
+                        Image(systemName: "bolt.slash")
+                    }
+                    .accessibilityLabel("Disconnect")
+                }
+            }
+
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                HStack(spacing: 9) {
+                    streamStatusLabel(
+                        "RR",
+                        lastReceivedAt: eventBridge.lastRR,
+                        now: timeline.date
+                    )
+                    streamStatusLabel(
+                        "ECG",
+                        lastReceivedAt: eventBridge.lastECG,
+                        now: timeline.date
+                    )
+                    streamStatusLabel(
+                        "ACC",
+                        lastReceivedAt: eventBridge.lastACC,
+                        now: timeline.date
+                    )
+                    Spacer(minLength: 4)
+                    if connectionPhase == .recording {
+                        Button("Stop Recording") {
+                            showStopRecordingConfirm = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.small)
+                    } else {
+                        Button("Start Recording") {
+                            connectionPhase = .recording
+                            isProcessing = true
+                            startRecording()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!manager.isReadyForRecording || isProcessing)
+                    }
+                }
+            }
+
+            if connectionPhase != .recording, !manager.isReadyForRecording {
+                Text("Waiting for required sensor streams…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var modeControls: some View {
+        VStack(spacing: 6) {
+            Picker("Mode", selection: $selectedMode) {
+                ForEach(Mode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(connectionPhase == .recording)
+
+            Button {
+                showModeSettings = true
+            } label: {
+                HStack {
+                    Text(modeConfigurationSummary)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Label("Edit", systemImage: "slider.horizontal.3")
+                        .font(.caption)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    Color(UIColor.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(connectionPhase == .recording)
+            .opacity(connectionPhase == .recording ? 0.65 : 1)
+        }
+    }
+
+    @ViewBuilder
+    private var recordingStatusContent: some View {
+        if connectionPhase == .recording {
+            HStack {
+                Text(
+                    selectedMode == .orthostatic
+                        ? "\(orthoPhaseName) · \(formatElapsed(elapsedSeconds))"
+                        : "Continuous · \(formatElapsed(elapsedSeconds))"
+                )
+                .font(.headline)
+                Spacer()
+                if selectedMode == .orthostatic, orthoUIPhase == .transition {
+                    Button("Start Standing") {
+                        orthoTester?.startStanding()
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else if selectedMode == .continuous {
+                    Button("Add Event", systemImage: "plus") {
+                        customEventTimestamp = Date()
+                        showCustomEventSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            if let interruption = continuousRecorder.interruptionMessage,
+               selectedMode == .continuous
+            {
+                Text("Recovering: \(interruption)")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if !manager.isReadyForRecording {
+                Text(
+                    manager.isConnected
+                        ? "Recovering Polar sensor streams…"
+                        : "Polar disconnected — recording remains active while reconnecting…"
+                )
+                .font(.caption)
+                .foregroundColor(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if selectedMode == .continuous, !liveActivityEnabledOnDevice {
+                Text("Live Activity unavailable — enable capability and widget")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+
+        if let statusNotice {
+            Text(statusNotice)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var orthostaticResultContent: some View {
+        if selectedMode == .orthostatic,
+           let summary = orthostaticResultSummary
+        {
+            Button {
+                showResults = true
+            } label: {
+                HStack {
+                    Text(summary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Label("Details", systemImage: "chevron.right")
+                        .font(.caption)
+                }
+                .padding(9)
+                .background(
+                    Color(UIColor.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var recordingBackground: Color {
+        if connectionPhase == .recording, !manager.isReadyForRecording {
+            return .orange.opacity(0.10)
+        }
+        switch (selectedMode, connectionPhase) {
+        case (.orthostatic, .recording):
+            return .green.opacity(0.10)
+        case (.continuous, .notConnected), (.continuous, .connected):
+            return .red.opacity(0.08)
+        default:
+            return .clear
+        }
+    }
+
+    private var modeConfigurationSummary: String {
+        switch selectedMode {
+        case .orthostatic:
+            return "Warmup \(formatDuration(warmupDurationSeconds)) · "
+                + "Laying \(formatDuration(layingDurationSeconds)) · "
+                + "Standing \(formatDuration(standingDurationSeconds))"
+        case .continuous:
+            return "Record \(formatDuration(recordingDurationSeconds)) · "
+                + "Every \(formatDuration(recordingIntervalSeconds))"
+        }
+    }
+
+    private var orthostaticResultSummary: String? {
+        guard let laying = orthostaticMetrics?[.laying],
+              let standing = orthostaticMetrics?[.standing]
+        else { return nil }
+        let index = laying.rmssd > 0 ? standing.rmssd / laying.rmssd : 0
+        return String(
+            format: "Laying %.0f ms · Standing %.0f ms · Index %.2f",
+            laying.rmssd,
+            standing.rmssd,
+            index
+        )
     }
 
     private func updateEventPresentationState() {
@@ -557,6 +704,7 @@ struct HRVView: View {
 
     private func startRecording() {
         let startedAt = Date()
+        statusNotice = nil
         startDate = startedAt
         activeRecording = AppRecordingStatus(
             startedAt: startedAt,
@@ -564,9 +712,10 @@ struct HRVView: View {
         )
         UIApplication.shared.isIdleTimerDisabled = selectedMode == .orthostatic
         elapsedSeconds = 0
-        eventBridge.resetGraph()
         updateElapsedTimer()
         if selectedMode == .orthostatic {
+            orthostaticMetrics = nil
+            consoleText = ""
             orthoTester = OrthostaticHRV(manager: manager,
                                          warmupDuration: TimeInterval(warmupDurationSeconds),
                                          layingDuration: TimeInterval(layingDurationSeconds),
@@ -605,20 +754,31 @@ struct HRVView: View {
                 }
                 .store(in: &subscriptions)
             orthoTester?
-                .resultsPublisher
+                .completionPublisher
                 .receive(on: DispatchQueue.main)
-                .sink { metrics in
-                    if let laying = metrics[.laying], let standing = metrics[.standing] {
-                        let index = laying.rmssd > 0 ? standing.rmssd / laying.rmssd : 0
-                        consoleText = [
-                            "Orthostatic HRV Results:",
-                            "  Laying: RMSSD = \(laying.rmssd) ms, Mean HR = \(laying.meanHR) bpm",
-                            "  Standing: RMSSD = \(standing.rmssd) ms, Mean HR = \(standing.meanHR) bpm",
-                            "  Orthostatic Index (Standing/Laying RMSSD): \(index)"
-                        ].joined(separator: "\n")
+                .sink { completion in
+                    switch completion {
+                    case .completed(let metrics):
+                        orthostaticMetrics = metrics
+                        if let laying = metrics[.laying],
+                           let standing = metrics[.standing]
+                        {
+                            let index = laying.rmssd > 0
+                                ? standing.rmssd / laying.rmssd : 0
+                            consoleText = [
+                                "Orthostatic HRV Results:",
+                                "  Laying: RMSSD = \(laying.rmssd) ms, Mean HR = \(laying.meanHR) bpm",
+                                "  Standing: RMSSD = \(standing.rmssd) ms, Mean HR = \(standing.meanHR) bpm",
+                                "  Orthostatic Index (Standing/Laying RMSSD): \(index)"
+                            ].joined(separator: "\n")
+                        }
+                        // Upload only a completed, retained recording.
+                        triggerDirectoryUploads()
+                    case .discardedShortRecording:
+                        orthostaticMetrics = nil
+                        consoleText = ""
+                        showTemporaryStatus("Short recording discarded")
                     }
-                    // After finishing, trigger uploads for any configured directories
-                    triggerDirectoryUploads()
                     finalizeOrthostaticRecording()
                 }
                 .store(in: &subscriptions)
@@ -664,6 +824,15 @@ struct HRVView: View {
         activeRecording = nil
         UIApplication.shared.isIdleTimerDisabled = false
         orthoTester = nil
+    }
+
+    private func showTemporaryStatus(_ message: String) {
+        statusNotice = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if statusNotice == message {
+                statusNotice = nil
+            }
+        }
     }
 
     private func updateElapsedTimer() {
@@ -724,10 +893,24 @@ struct HRVView: View {
             return String(format: "%02d:%02d", minutes, secs)
         }
         
-        private func formatLast(_ date: Date?) -> String {
-            guard let date = date else { return "--" }
-            let diff = Int(Date().timeIntervalSince(date))
-            return "\(diff)s ago"
+        private func streamStatusLabel(
+            _ name: String,
+            lastReceivedAt: Date?,
+            now: Date
+        ) -> some View {
+            let age = lastReceivedAt.map {
+                max(0, Int(now.timeIntervalSince($0)))
+            }
+            let isLive = age.map { $0 <= 10 } ?? false
+            let detail = age.map { "\($0)s" } ?? "--"
+            return HStack(spacing: 4) {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 6))
+                    .foregroundColor(isLive ? .green : .orange)
+                Text("\(name) \(detail)")
+                    .monospacedDigit()
+            }
+            .font(.caption)
         }
         
         /// Schedules notifications, audio, and haptic feedback to prompt user to stand.

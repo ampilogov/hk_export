@@ -1542,25 +1542,29 @@ enum SensorBagPersistence {
         from events: [SensorEvent],
         in range: ClosedRange<Date>
     ) -> [ECGPlotPoint] {
-        var points: [ECGPlotPoint] = []
-        for event in events {
-            guard case .ecgSamples(let packet) = event.data,
-                  let lastTimestamp = packet.samples.last?.timestamp
-            else { continue }
-            for sample in packet.samples {
-                let timestamp = wallTime(
+        events
+            .flatMap { ecgPoints(from: $0) }
+            .filter { range.contains($0.timestamp) }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Convert one received ECG packet to wall-clock points. The presentation
+    /// layer uses the same conversion as persisted recordings so a live trace
+    /// joins its saved counterpart without a timestamp discontinuity.
+    static func ecgPoints(from event: SensorEvent) -> [ECGPlotPoint] {
+        guard case .ecgSamples(let packet) = event.data,
+              let lastTimestamp = packet.samples.last?.timestamp
+        else { return [] }
+        return packet.samples.map { sample in
+            ECGPlotPoint(
+                timestamp: wallTime(
                     receivedAt: event.timestamp,
                     deviceTimestamp: sample.timestamp,
                     lastDeviceTimestamp: lastTimestamp
-                )
-                if range.contains(timestamp) {
-                    points.append(
-                        ECGPlotPoint(timestamp: timestamp, voltage: sample.voltage)
-                    )
-                }
-            }
+                ),
+                voltage: sample.voltage
+            )
         }
-        return points.sorted { $0.timestamp < $1.timestamp }
     }
 
     private static func wallTime(

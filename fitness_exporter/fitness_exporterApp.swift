@@ -90,29 +90,5 @@ struct ContentView: View {
                 }
                 .tag(Tab.hrv)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if let activeRecording {
-                Button {
-                    selection = .hrv
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "record.circle.fill")
-                            .foregroundColor(.red)
-                        Text(activeRecording.modeName)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(activeRecording.startedAt, style: .timer)
-                            .monospacedDigit()
-                        Image(systemName: "chevron.right")
-                    }
-                    .font(.footnote.weight(.semibold))
-                    .padding(.horizontal)
-                    .padding(.vertical, 10)
-                    .background(.bar)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Return to active recording")
-            }
-        }
     }
 }

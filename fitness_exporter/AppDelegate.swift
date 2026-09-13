@@ -38,10 +38,21 @@ private final class BackgroundTaskCompletionGate {
 }
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
+    /// SwiftUI presentations can request a concrete orientation by narrowing
+    /// this mask before asking the window scene to update its geometry.
+    static var supportedOrientationMask: UIInterfaceOrientationMask = .all
+
     static let BG_APP_REFRESH_IDENTIFIER =
         "com.artemz.fitness_exporter.app_refresh"
     static let BG_PROCESSING_IDENTIFIER =
         "com.artemz.fitness_exporter.processing"
+
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        Self.supportedOrientationMask
+    }
 
     func scheduleAppRefreshTask() {
         let request = BGAppRefreshTaskRequest(

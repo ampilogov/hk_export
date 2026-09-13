@@ -97,6 +97,7 @@ final class ContinuousRecorder: ObservableObject {
 
     private static let liveActivityMinimumUpdateInterval: TimeInterval = 30
     private static let watchdogRefreshInterval: TimeInterval = 60
+    private static let recordingHealthRefreshInterval: TimeInterval = 5
     private static let healthyStreamMaximumAge: TimeInterval = 15
     private static let staleStreamMaximumAge: TimeInterval = 10
 
@@ -316,7 +317,10 @@ final class ContinuousRecorder: ObservableObject {
 
     private func startStaleTimer() {
         staleTimer?.invalidate()
-        staleTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        staleTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.recordingHealthRefreshInterval,
+            repeats: true
+        ) { _ in
             self.checkStaleness()
         }
     }
