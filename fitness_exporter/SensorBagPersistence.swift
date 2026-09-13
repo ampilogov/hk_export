@@ -1394,7 +1394,8 @@ enum SensorBagPersistence {
     static func loadECGWindow(
         centeredAt center: Date,
         halfWidth: TimeInterval,
-        liveEvents: [SensorEvent] = []
+        liveEvents: [SensorEvent] = [],
+        recordingDirectory: URL? = nil
     ) throws -> [ECGPlotPoint] {
         let range = center.addingTimeInterval(-halfWidth)...center.addingTimeInterval(halfWidth)
         let livePoints = ecgPoints(from: liveEvents, in: range)
@@ -1404,11 +1405,11 @@ enum SensorBagPersistence {
             (livePoints.first?.timestamp ?? .distantFuture) <= range.lowerBound
             && (livePoints.last?.timestamp ?? .distantPast) >= range.upperBound
         if !liveCoversRange {
-            let directory = documentsDirectory().appendingPathComponent(
+            let directory = recordingDirectory ?? documentsDirectory().appendingPathComponent(
                 Profile.continuous.rawValue,
                 isDirectory: true
             )
-            for entry in try candidateECGFiles(in: directory, centeredAt: center) {
+            for entry in try candidateECGFiles(in: directory, covering: range) {
                 let snapshot = try readStableFile(fileURL: entry.url)
                 do {
                     filePoints.append(
@@ -1583,14 +1584,22 @@ enum SensorBagPersistence {
 
     private static func candidateECGFiles(
         in directory: URL,
-        centeredAt center: Date
+        covering range: ClosedRange<Date>
     ) throws -> [ECGFileIndexEntry] {
         let entries = try indexedECGFiles(in: directory)
         guard !entries.isEmpty else { return [] }
-        let target = center.timeIntervalSince1970
-        let insertionIndex = entries.firstIndex { $0.finalizedAt >= target } ?? entries.count
-        let lower = max(0, insertionIndex - 2)
-        let upper = min(entries.count, insertionIndex + 1)
+        // Names record finalization time, not the start of the contained data.
+        // Include the file finalized after the window ends, even when the
+        // window crosses one or more boundaries. Keep the preceding neighbors
+        // for packet overlap and the filename's whole-second rounding.
+        let first = entries.firstIndex {
+            $0.finalizedAt >= range.lowerBound.timeIntervalSince1970
+        } ?? entries.count
+        let last = entries.firstIndex {
+            $0.finalizedAt > range.upperBound.timeIntervalSince1970
+        } ?? entries.count
+        let lower = max(0, first - 2)
+        let upper = min(entries.count, last + 1)
         return Array(entries[lower..<upper])
     }
 

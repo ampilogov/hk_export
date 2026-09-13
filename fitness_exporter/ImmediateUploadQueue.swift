@@ -256,6 +256,16 @@ final class ImmediateUploadQueue {
         }
     }
 
+    func nextRetryAt() throws -> Date? {
+        let statement = try prepare("SELECT MIN(next_attempt_at) FROM pending_uploads;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw databaseError(operation: "read next retry time")
+        }
+        guard sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 0))
+    }
+
     @discardableResult
     func markFailed(
         relativePath: String,
@@ -595,6 +605,12 @@ final class ImmediateUploadQueue {
 final class ImmediateUploadService {
     static let shared = ImmediateUploadService()
 
+    static func retryDelay(until retryAt: Date, now: Date = Date()) -> TimeInterval {
+        // If saving the next deadline fails, the old one can remain overdue.
+        // Never turn that persistence failure into a tight network retry loop.
+        max(60, retryAt.timeIntervalSince(now))
+    }
+
     private let stateQueue = DispatchQueue(
         label: "com.fitness_exporter.immediateUpload.state"
     )
@@ -605,6 +621,9 @@ final class ImmediateUploadService {
     private var isDraining = false
     private var restartRequested = false
     private var completions: [(String?) -> Void] = []
+    private var retryWork: DispatchWorkItem?
+    // Accessed only on workerQueue; shared cooldown survives process restarts.
+    private var collectionRetryAt: Date?
 
     func enqueue(fileURL: URL) throws {
         _ = try ImmediateUploadQueue.withDefault { queue in
@@ -614,6 +633,8 @@ final class ImmediateUploadService {
 
     func resume(completion: ((String?) -> Void)? = nil) {
         stateQueue.async { [self] in
+            retryWork?.cancel()
+            retryWork = nil
             if let completion { completions.append(completion) }
             guard !isDraining else {
                 restartRequested = true
@@ -655,6 +676,15 @@ final class ImmediateUploadService {
             )
         }
         config = currentConfig
+        collectionRetryAt = UploadCollectionRetryStore.shared.nextAttemptAt(
+            server: config.server,
+            sender: config.sender
+        )
+        if let collectionRetryAt {
+            return finish(
+                "Upload retry is scheduled after the server cooldown at \(collectionRetryAt)."
+            )
+        }
 
         let directory: UploadDirectory
         do {
@@ -688,9 +718,10 @@ final class ImmediateUploadService {
             guard let self else { return }
             self.workerQueue.async {
                 if let failure {
-                    self.recordFailure(pending, message: failure.message)
+                    self.recordFailure(pending, message: failure.message, scope: failure.scope)
                     return
                 }
+                UploadCollectionRetryStore.shared.clear(server: config.server, sender: config.sender)
                 do {
                     try ImmediateUploadQueue.withDefault { queue in
                         let done = try UploadHelper.doneRecord(
@@ -768,8 +799,15 @@ final class ImmediateUploadService {
 
     private func recordFailure(
         _ pending: PendingImmediateUpload,
-        message: String
+        message: String,
+        scope: UploadFailureScope = .file
     ) {
+        if scope == .collection, let config = DirectoryUploader.getServerAndSender() {
+            collectionRetryAt = UploadCollectionRetryStore.shared.recordCircuitOpen(
+                server: config.server,
+                sender: config.sender
+            ).nextAttemptAt
+        }
         let finalMessage: String
         do {
             try ImmediateUploadQueue.withDefault { queue in
@@ -801,12 +839,35 @@ final class ImmediateUploadService {
                 workerQueue.async { [weak self] in
                     self?.processNext()
                 }
+            } else {
+                workerQueue.async { [weak self] in
+                    self?.scheduleNextRetry()
+                }
             }
             DispatchQueue.main.async {
                 for callback in callbacks {
                     callback(error)
                 }
             }
+        }
+    }
+
+    private func scheduleNextRetry() {
+        do {
+            let fileRetryAt = try ImmediateUploadQueue.withDefault { try $0.nextRetryAt() }
+            guard let retryAt = [fileRetryAt, collectionRetryAt].compactMap({ $0 }).max() else { return }
+            stateQueue.async { [weak self] in
+                guard let self, !self.isDraining else { return }
+                self.retryWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.resume() }
+                self.retryWork = work
+                self.stateQueue.asyncAfter(
+                    deadline: .now() + Self.retryDelay(until: retryAt),
+                    execute: work
+                )
+            }
+        } catch {
+            CustomLogger.log("[Upload][Immediate][Error] Schedule retry: \(error.localizedDescription)")
         }
     }
 }

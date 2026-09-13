@@ -1,6 +1,6 @@
 # My Requirements
 
-Last updated: September 8, 2026
+Last updated: September 12, 2026
 
 This document tracks improvements to continuous Polar H10 recording. Requirements are kept separate from implementation considerations so that each item can be discussed, implemented, and verified independently.
 
@@ -19,7 +19,8 @@ Completed items are removed from this active tracker instead of accumulating und
 - An unhandled error must stop the affected persistence, HealthKit, export, or upload pipeline. It must not advance a cursor, mark data complete, delete a source file, or silently skip the failed unit.
 - Show the exact failed operation, data type/file or time range, and underlying error to the user. Record the same context in the application log.
 - A pipeline failure should be explicit and retryable rather than an intentional process crash. Raw recording may continue when its data is already durable and only a downstream HealthKit/upload stage failed; the failed downstream stage must remain pending.
-- Automatic retries must be bounded and visible. Never convert failure into success merely because all remaining items were traversed.
+- Automatic retries must be bounded in rate and visible, without abandoning pending files after a finite lifetime retry budget. Never convert failure into success merely because all remaining items were traversed.
+- Finalized source files remain pending until durable server acceptance is confirmed. Retry an uncertain result with the same file bytes, directory, filename, user, and version so Overfit deduplicates the upload. Local HealthKit import and server file upload are independent; success in one must not imply success in the other.
 - The SensorBag v1 binary bytes, visible `.bin` filename scheme, and server-facing upload/export contract are compatibility requirements. Internal durability work may use temporary files, but the final filename, payload metadata, endpoint-visible type/version, and source bytes must remain unchanged unless a separate server migration is explicitly approved.
 
 ## Platform compatibility

@@ -519,6 +519,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
 
     private let store: BackgroundUploadJobStore?
     private let setupError: String?
+    private let sessionConfiguration: URLSessionConfiguration
     private let submissionLock = NSLock()
     private let stateQueue = DispatchQueue(
         label: "com.fitness_exporter.backgroundUpload.state"
@@ -532,7 +533,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
     private var eventsCompletionHandler: (() -> Void)?
     private var finishedEventsBeforeHandler = false
 
-    private lazy var session: URLSession = {
+    private static func backgroundConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.background(
             withIdentifier: Self.sessionIdentifier
         )
@@ -547,17 +548,22 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
         configuration.allowsCellularAccess = true
         configuration.allowsConstrainedNetworkAccess = true
         configuration.allowsExpensiveNetworkAccess = true
+        return configuration
+    }
+
+    private lazy var session: URLSession = {
         let delegateQueue = OperationQueue()
         delegateQueue.name = "com.fitness_exporter.backgroundUpload.delegate"
         delegateQueue.maxConcurrentOperationCount = 1
         return URLSession(
-            configuration: configuration,
+            configuration: sessionConfiguration,
             delegate: self,
             delegateQueue: delegateQueue
         )
     }()
 
     override init() {
+        sessionConfiguration = Self.backgroundConfiguration()
         do {
             store = try BackgroundUploadJobStore()
             setupError = nil
@@ -565,6 +571,13 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
             store = nil
             setupError = error.localizedDescription
         }
+        super.init()
+    }
+
+    init(store: BackgroundUploadJobStore, configuration: URLSessionConfiguration) {
+        self.store = store
+        setupError = nil
+        sessionConfiguration = configuration
         super.init()
     }
 
@@ -642,9 +655,17 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
             }
             switch existing.state {
             case .unknown:
-                throw BackgroundUploadError.transfer(
-                    existing.lastError
-                        ?? "the previous transfer outcome is unknown; refusing retransmission"
+                // Overfit identifies a file by content, directory, filename,
+                // user and version. Repeating this unchanged payload is safe
+                // even if the previous response was lost after acceptance.
+                try validateSource()
+                try store.remove(id: existing.id)
+                if let bodyURL = try? store.bodyURL(fileName: existing.bodyFileName) {
+                    try? FileManager.default.removeItem(at: bodyURL)
+                }
+                CustomLogger.log(
+                    "[Upload][Background][Retry] file=\(record.fileName) "
+                        + "retrying an uncertain outcome with the same file identity"
                 )
             case .accepted:
                 appendCallback(completion, jobID: existing.id)
@@ -654,11 +675,12 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                     defer { self.submissionLock.unlock() }
                     self.finalizeAcceptedJob(existing)
                 }
+                return
             case .staged, .submitted:
                 appendCallback(completion, jobID: existing.id)
                 reconcileOutstandingTasks()
+                return
             }
-            return
         }
 
         let jobID = UUID().uuidString
@@ -1047,7 +1069,7 @@ final class BackgroundFileUploadManager: CustomSessionDelegate,
                         job.lastError =
                             "The system no longer reports background task "
                             + "\(job.taskIdentifier ?? -1), so its server outcome is unknown. "
-                            + "Automatic retransmission was stopped to avoid a duplicate."
+                            + "The source remains pending for an idempotent retry."
                         try store.update(job)
                         let message = job.lastError ?? "Upload outcome is unknown"
                         self.attention(message)

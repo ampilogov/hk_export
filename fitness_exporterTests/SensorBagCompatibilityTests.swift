@@ -1,4 +1,5 @@
 import CryptoKit
+import SwiftUI
 import UserNotifications
 import XCTest
 import zlib
@@ -93,6 +94,69 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(offsets[0], -0.008, accuracy: 0.000_001)
         XCTAssertEqual(offsets[1], -0.004, accuracy: 0.000_001)
         XCTAssertEqual(offsets[2], 0, accuracy: 0.000_001)
+    }
+
+    func test_ECGWindow_loadsAcrossFinalizedFilesAndPreservesBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var originals: [URL: Data] = [:]
+        for (finalizedAt, timestamps) in [(300, [298]), (600, [594, 598, 599]), (900, [600, 601, 603, 605])] {
+            let events = timestamps.map { timestamp in
+                SensorEvent(
+                    timestamp: Date(timeIntervalSince1970: Double(timestamp)),
+                    data: .ecgSamples(ECGSamples(samples: [ECGSample(timestamp: 1, voltage: 42)]))
+                )
+            }
+            let url = root.appendingPathComponent("\(finalizedAt).bin")
+            let data = SensorBag()._serializeV1(events)
+            try data.write(to: url)
+            originals[url] = data
+        }
+        let points = try SensorBagPersistence.loadECGWindow(
+            centeredAt: Date(timeIntervalSince1970: 598), halfWidth: 5, recordingDirectory: root
+        )
+        XCTAssertEqual(points.map { Int($0.timestamp.timeIntervalSince1970) }, [594, 598, 599, 600, 601, 603])
+        for (url, original) in originals { XCTAssertEqual(try Data(contentsOf: url), original) }
+    }
+
+    func test_ECGTrace_highZoomAndIsolatedSamplesPaintVisiblePixels() throws {
+        let start = Date(timeIntervalSince1970: 100)
+        let samples = (0..<162).map { index in
+            ECGPlotPoint(
+                timestamp: start.addingTimeInterval(Double(index) / 130),
+                voltage: Int16(sin(Double(index) / 10) * 100)
+            )
+        }
+        for points in [samples, [ECGPlotPoint(timestamp: start.addingTimeInterval(0.5), voltage: 0)]] {
+            let path = ECGTraceGeometry.path(
+                for: points, in: start...start.addingTimeInterval(1.25), size: CGSize(width: 350, height: 260)
+            )
+            let context = try XCTUnwrap(CGContext(
+                data: nil, width: 350, height: 260, bitsPerComponent: 8, bytesPerRow: 350 * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            context.setStrokeColor(UIColor.green.cgColor)
+            context.setLineWidth(1)
+            context.setLineCap(.round)
+            context.addPath(path.cgPath)
+            context.strokePath()
+            let pixels = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+            XCTAssertTrue((0..<(350 * 260)).contains { pixels[$0 * 4 + 3] > 0 })
+        }
+    }
+
+    func test_ECGTrace_doesNotConnectAcrossMissingInterval() {
+        let start = Date(timeIntervalSince1970: 100)
+        let points = [0.0, 0.01, 1.0, 1.01].map {
+            ECGPlotPoint(timestamp: start.addingTimeInterval($0), voltage: 0)
+        }
+        let path = ECGTraceGeometry.path(
+            for: points, in: start...start.addingTimeInterval(2), size: CGSize(width: 350, height: 260)
+        )
+        var subpaths = 0
+        path.cgPath.applyWithBlock { if $0.pointee.type == .moveToPoint { subpaths += 1 } }
+        XCTAssertEqual(subpaths, 2)
     }
 
     func test_v1ECGWindow_rejectsTruncatedPayload() {
@@ -1651,6 +1715,76 @@ final class SensorBagCompatibilityTests: XCTestCase {
         )
     }
 
+    func test_backgroundUpload_unknownOutcomeCanRetryAndCommitCompletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let base = root.appendingPathComponent("continuous")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = base.appendingPathComponent("600.bin")
+        let bytes = Data("immutable recording".utf8)
+        try bytes.write(to: file)
+        let snapshot = try UploadHelper.readStableFile(file)
+        let bookmark = try base.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+        let store = try BackgroundUploadJobStore(rootURL: root.appendingPathComponent("jobs"))
+        let id = UUID().uuidString
+        let job = BackgroundUploadJob(
+            version: BackgroundUploadJob.schemaVersion, id: id, deduplicationKey: "same-destination",
+            state: .unknown, taskIdentifier: 42, bodyFileName: "\(id).body",
+            basePath: base.path, baseBookmark: bookmark, sourceFilePath: file.path,
+            record: snapshot.record, sourceSystemFileNumber: snapshot.systemFileNumber,
+            immediateRelativePath: nil, createdAt: Date(), lastError: "Response lost"
+        )
+        try store.insert(job)
+        try Data("old body".utf8).write(to: store.bodyURL(fileName: job.bodyFileName))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SuccessfulUploadProtocol.self]
+        let manager = BackgroundFileUploadManager(store: store, configuration: configuration)
+        let completed = expectation(description: "uncertain upload is retried")
+        try manager.uploadFile(
+            deduplicationKey: job.deduplicationKey, server: "https://upload.test/upload/", sender: "test",
+            directoryName: "continuous", baseURL: base, baseBookmark: bookmark, sourceFileURL: file,
+            fileBytes: snapshot.data, record: snapshot.record, sourceSystemFileNumber: snapshot.systemFileNumber,
+            immediateRelativePath: nil, cancellationToken: nil,
+            validateSource: { try UploadHelper.verifyUnchanged(snapshot, fileURL: file) }
+        ) { failure in
+            XCTAssertNil(failure)
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 10)
+        XCTAssertEqual(try UploadHelper.doneRecord(fileName: file.lastPathComponent, base: base), snapshot.record)
+        XCTAssertTrue(try store.allJobs().isEmpty)
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+        withExtendedLifetime(manager) {}
+    }
+
+    func test_immediateUploadQueue_retryTimeSurvivesReopeningUntilSuccess() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("600.bin")
+        try Data([1, 2, 3]).write(to: file)
+        let databaseURL = root.appendingPathComponent("queue.sqlite3")
+        let now = Date(timeIntervalSince1970: 100)
+        do {
+            let queue = try ImmediateUploadQueue(documentsURL: root, databaseURL: databaseURL)
+            let pending = try queue.enqueue(fileURL: file, now: now)
+            _ = try queue.markFailed(relativePath: pending.relativePath, error: "Response lost", now: now)
+        }
+        let reopened = try ImmediateUploadQueue(documentsURL: root, databaseURL: databaseURL)
+        XCTAssertEqual(try reopened.nextRetryAt(), now.addingTimeInterval(60))
+        XCTAssertNil(try reopened.nextDue(at: now.addingTimeInterval(59)))
+        let due = try XCTUnwrap(reopened.nextDue(at: now.addingTimeInterval(60)))
+        try reopened.remove(relativePath: due.relativePath)
+        XCTAssertNil(try reopened.nextRetryAt())
+    }
+
+    func test_immediateRetry_overduePersistedDeadlineCannotCauseTightLoop() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        // A failed SQLite write may leave the previous retry deadline overdue.
+        XCTAssertEqual(ImmediateUploadService.retryDelay(until: now.addingTimeInterval(-600), now: now), 60)
+        XCTAssertEqual(ImmediateUploadService.retryDelay(until: now.addingTimeInterval(3_600), now: now), 3_600)
+    }
+
     func test_backgroundUploadJobStore_roundTripsDurableStateTransitions() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory
@@ -1856,4 +1990,15 @@ private final class RecordingNotificationCenterSpy: RecordingNotificationSchedul
         }
         onRemove?()
     }
+}
+
+private final class SuccessfulUploadProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "upload.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

@@ -222,7 +222,7 @@ struct ECGDetailView: View {
                     )
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Drag horizontally to pan. Pinch to zoom.")
+                        Text("Drag horizontally to pan. Pinch to zoom. Blank regions indicate unavailable ECG samples.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         ECGPlotCanvas(points: points, centeredAt: centeredAt)
@@ -257,6 +257,48 @@ struct ECGDetailView: View {
     }
 }
 
+/// The viewer displays at most ten seconds (about 1,300 H10 samples), so
+/// drawing the individual samples preserves detail at every zoom level.
+/// Never connect across a missing interval of more than 100 milliseconds.
+enum ECGTraceGeometry {
+    static let maximumConnectedInterval: TimeInterval = 0.1
+
+    static func path(
+        for points: [ECGPlotPoint],
+        in range: ClosedRange<Date>,
+        size: CGSize
+    ) -> Path {
+        let duration = range.upperBound.timeIntervalSince(range.lowerBound)
+        let visible = points.filter { range.contains($0.timestamp) }
+        guard duration > 0, duration.isFinite,
+              size.width > 0, size.height > 0,
+              let minimum = visible.map(\.voltage).min(),
+              let maximum = visible.map(\.voltage).max() else { return Path() }
+        let padding = minimum == maximum ? max(abs(Double(minimum)) * 0.05, 1) : 0
+        let voltageMin = Double(minimum) - padding
+        let voltageSpan = max(Double(maximum) + padding - voltageMin, 1)
+        var path = Path()
+        var previousTimestamp: Date?
+
+        for sample in visible {
+            let point = CGPoint(
+                x: sample.timestamp.timeIntervalSince(range.lowerBound) / duration * size.width,
+                y: (1 - (Double(sample.voltage) - voltageMin) / voltageSpan) * size.height
+            )
+            let separation = previousTimestamp.map { sample.timestamp.timeIntervalSince($0) }
+            if let separation, separation >= 0, separation <= maximumConnectedInterval {
+                path.addLine(to: point)
+            } else {
+                // A short mark also makes an isolated sample visible.
+                path.move(to: CGPoint(x: point.x - 0.5, y: point.y))
+                path.addLine(to: point)
+            }
+            previousTimestamp = sample.timestamp
+        }
+        return path
+    }
+}
+
 private struct ECGPlotCanvas: View {
     let points: [ECGPlotPoint]
     let centeredAt: Date
@@ -282,42 +324,16 @@ private struct ECGPlotCanvas: View {
 
             Canvas { context, size in
                 guard !visible.isEmpty, size.width >= 1, size.height >= 1 else { return }
-                let columnCount = max(1, Int(size.width.rounded(.up)))
-                var minimums = Array(repeating: Double.infinity, count: columnCount)
-                var maximums = Array(repeating: -Double.infinity, count: columnCount)
-                var voltageMin = Double.infinity
-                var voltageMax = -Double.infinity
-
-                for point in visible {
-                    let fraction = point.timestamp.timeIntervalSince(start) / duration
-                    let column = min(
-                        max(Int(fraction * Double(columnCount)), 0),
-                        columnCount - 1
-                    )
-                    let voltage = Double(point.voltage)
-                    minimums[column] = min(minimums[column], voltage)
-                    maximums[column] = max(maximums[column], voltage)
-                    voltageMin = min(voltageMin, voltage)
-                    voltageMax = max(voltageMax, voltage)
-                }
-
-                let padding = voltageMin == voltageMax
-                    ? max(abs(voltageMin) * 0.05, 1)
-                    : 0
-                voltageMin -= padding
-                voltageMax += padding
-                let voltageSpan = max(voltageMax - voltageMin, 1)
-                func y(_ voltage: Double) -> CGFloat {
-                    CGFloat(1 - (voltage - voltageMin) / voltageSpan) * size.height
-                }
-
-                var path = Path()
-                for column in 0..<columnCount where minimums[column].isFinite {
-                    let x = CGFloat(column) + 0.5
-                    path.move(to: CGPoint(x: x, y: y(minimums[column])))
-                    path.addLine(to: CGPoint(x: x, y: y(maximums[column])))
-                }
-                context.stroke(path, with: .color(.green), lineWidth: 1)
+                let path = ECGTraceGeometry.path(
+                    for: visible,
+                    in: start...end,
+                    size: size
+                )
+                context.stroke(
+                    path,
+                    with: .color(.green),
+                    style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round)
+                )
             }
             .background(Color(UIColor.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 8))
