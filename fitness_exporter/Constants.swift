@@ -217,7 +217,10 @@ class ExportConstants {
         .sleepApneaEvent,
     ]
 
-    static let CLINICAL_TYPES: [HKClinicalTypeIdentifier] = [
+    #if ARTEM_BUILD
+        static let CLINICAL_TYPES: [HKClinicalTypeIdentifier] = []
+    #else
+        static let CLINICAL_TYPES: [HKClinicalTypeIdentifier] = [
         .allergyRecord,
         .clinicalNoteRecord,
         .conditionRecord,
@@ -227,7 +230,8 @@ class ExportConstants {
         .procedureRecord,
         .vitalSignRecord,
         .coverageRecord,
-    ]
+        ]
+    #endif
 
     static func getSampleTypesOfInterest() -> [HKSampleType] {
         let sampleTypesOfInterest =

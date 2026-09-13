@@ -1238,12 +1238,14 @@ class HealthKitManager {
         }
 
         let healthStore = HKHealthStore()
+        #if !ARTEM_BUILD
         guard healthStore.supportsHealthRecords() else {
             let message = "Clinical Health Records are not supported on this device."
             authorizationErrorMessage = message
             CustomLogger.log("[HKM][Error] \(message)")
             return completion(false)
         }
+        #endif
 
         let readTypes = unifiedReadTypes()
         let shareTypes = unifiedShareTypes()

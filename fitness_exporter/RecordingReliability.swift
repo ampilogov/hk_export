@@ -2,6 +2,20 @@ import Foundation
 import MetricKit
 import UserNotifications
 
+enum RecordingNotificationPolicy {
+    static var attentionInterruptionLevel: UNNotificationInterruptionLevel {
+        #if ARTEM_BUILD
+            return .active
+        #else
+            return .timeSensitive
+        #endif
+    }
+
+    static var usesTimeSensitiveAlerts: Bool {
+        attentionInterruptionLevel == .timeSensitive
+    }
+}
+
 struct ActiveRecordingMarker: Codable {
     let sessionID: UUID
     let startedAt: Date
@@ -135,7 +149,9 @@ final class RecordingWatchdog {
                 guard self.activeSessionID == sessionID else { return }
                 switch settings.authorizationStatus {
                 case .authorized, .provisional, .ephemeral:
-                    if settings.timeSensitiveSetting != .enabled {
+                    if RecordingNotificationPolicy.usesTimeSensitiveAlerts,
+                        settings.timeSensitiveSetting != .enabled
+                    {
                         warning(
                             "Recording alerts are allowed, but Time Sensitive alerts are disabled. Focus may delay a recording warning."
                         )
@@ -204,7 +220,8 @@ final class RecordingWatchdog {
             content.body =
                 "The app has not confirmed healthy RR, ECG, and ACC recording. Open it to check the session."
             content.sound = .default
-            content.interruptionLevel = .timeSensitive
+            content.interruptionLevel =
+                RecordingNotificationPolicy.attentionInterruptionLevel
             content.userInfo = ["recordingSessionID": sessionID.uuidString]
 
             let trigger = UNTimeIntervalNotificationTrigger(
@@ -368,7 +385,8 @@ final class RecordingInterruptionNotifier {
         attentionContent.body =
             "The recording has not recovered. Open the app to check the Polar connection."
         attentionContent.sound = .default
-        attentionContent.interruptionLevel = .timeSensitive
+        attentionContent.interruptionLevel =
+            RecordingNotificationPolicy.attentionInterruptionLevel
         attentionContent.userInfo = ["recordingSessionID": sessionID.uuidString]
 
         return [

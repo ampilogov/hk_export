@@ -357,7 +357,10 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertNil(requests[0].content.sound)
         XCTAssertNotNil(requests[1].content.sound)
         XCTAssertEqual(requests[0].content.interruptionLevel, .active)
-        XCTAssertEqual(requests[1].content.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(
+            requests[1].content.interruptionLevel,
+            RecordingNotificationPolicy.attentionInterruptionLevel
+        )
 
         let alreadyStale = RecordingInterruptionNotifier.makeRequests(
             sessionID: sessionID,
