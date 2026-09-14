@@ -12,7 +12,6 @@
 	<array>
 		<string>fetch</string>
 		<string>processing</string>
-		<string>remote-notification</string>
 		<string>bluetooth-central</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
@@ -25,20 +24,6 @@
 	<key>com.apple.developer.activity-types</key>
 	<array>
 		<string>liveActivities</string>
-	</array>
-	<key>NSHealthClinicalHealthRecordsShareUsageDescription</key>
-	<string>This app uses your clinical health records to provide personalized health insights and recommendations.</string>
-	<key>NSHealthRequiredReadAuthorizationTypeIdentifiers</key>
-	<array>
-		<string>HKClinicalTypeIdentifierAllergyRecord</string>
-		<string>HKClinicalTypeIdentifierClinicalNoteRecord</string>
-		<string>HKClinicalTypeIdentifierConditionRecord</string>
-		<string>HKClinicalTypeIdentifierImmunizationRecord</string>
-		<string>HKClinicalTypeIdentifierLabResultRecord</string>
-		<string>HKClinicalTypeIdentifierMedicationRecord</string>
-		<string>HKClinicalTypeIdentifierProcedureRecord</string>
-		<string>HKClinicalTypeIdentifierVitalSignRecord</string>
-		<string>HKClinicalTypeIdentifierCoverageRecord</string>
 	</array>
 	<key>NSHealthShareUsageDescription</key>
 	<string>We use HealthKit data to provide insights in the app.</string>

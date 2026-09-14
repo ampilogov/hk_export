@@ -41,7 +41,23 @@
 		ACF1A0113ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A0103ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift */; };
 		ACF1A0123ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF1A00F3ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift */; };
 		ACF1A0153ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		ACF2B0023ABCDEFF00AAA200 /* RecordingReliability.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2B0013ABCDEFF00AAA200 /* RecordingReliability.swift */; };
+		ACF2C0033ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2C0023ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift */; };
+		ACF2D0023ABCDEFF00AAA400 /* UploadCompletionIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */; };
+		ACF2E0023ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */; };
+		ACF2F0023ABCDEFF00AAA600 /* ImmediateUploadQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF2F0013ABCDEFF00AAA600 /* ImmediateUploadQueue.swift */; };
+		ACF300023ABCDEFF00AAA700 /* BackgroundFileUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF300013ABCDEFF00AAA700 /* BackgroundFileUpload.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		ACF2C00C3ABCDEFF00AAA300 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AC6C78412BAF905500E4A6C3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AC6C78482BAF905500E4A6C3;
+			remoteInfo = fitness_exporter;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		ACF1A00C3ABCDEFF00AAA100 /* Embed App Extensions */ = {
@@ -69,6 +85,8 @@
 		AC6C785A2BAF949000E4A6C3 /* HealthDataExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataExporter.swift; sourceTree = "<group>"; };
 		AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = fitness_exporter.entitlements; sourceTree = "<group>"; };
 		AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Info.plist"; sourceTree = SOURCE_ROOT; };
+		ACFA10013ABCDEFF00100001 /* fitness_exporter.artem.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = fitness_exporter.artem.entitlements; sourceTree = "<group>"; };
+		ACFA10023ABCDEFF00100002 /* fitness-exporter-Artem-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "fitness-exporter-Artem-Info.plist"; sourceTree = SOURCE_ROOT; };
 		ACC37A922E1CE33700832ACF /* HRVOrthostatic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HRVOrthostatic.swift; sourceTree = "<group>"; };
 		ACC37A972E2F662B00832ACF /* BluetoothBackends.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothBackends.swift; sourceTree = "<group>"; };
 		ACC37A992E328E4E00832ACF /* BluetoothUUID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothUUID.swift; sourceTree = "<group>"; };
@@ -94,6 +112,13 @@
 		ACF1A00F3ABCDEFF00AAA100 /* fitness_exporterLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = fitness_exporterLiveActivityBundle.swift; sourceTree = "<group>"; };
 		ACF1A0103ABCDEFF00AAA100 /* ContinuousRecordingLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuousRecordingLiveActivity.swift; sourceTree = "<group>"; };
 		ACF1A0133ABCDEFF00AAA100 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		ACF2B0013ABCDEFF00AAA200 /* RecordingReliability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingReliability.swift; sourceTree = "<group>"; };
+		ACF2C0013ABCDEFF00AAA300 /* fitness_exporterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = fitness_exporterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		ACF2C0023ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagCompatibilityTests.swift; sourceTree = "<group>"; };
+		ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadCompletionIndex.swift; sourceTree = "<group>"; };
+		ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorBagBackfillIndex.swift; sourceTree = "<group>"; };
+		ACF2F0013ABCDEFF00AAA600 /* ImmediateUploadQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImmediateUploadQueue.swift; sourceTree = "<group>"; };
+		ACF300013ABCDEFF00AAA700 /* BackgroundFileUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundFileUpload.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +137,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ACF2C0053ABCDEFF00AAA300 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -119,6 +151,7 @@
 			isa = PBXGroup;
 			children = (
 				AC6C784B2BAF905500E4A6C3 /* fitness_exporter */,
+				ACF2C00B3ABCDEFF00AAA300 /* fitness_exporterTests */,
 				AC6C784A2BAF905500E4A6C3 /* Products */,
 				ACF1A00D3ABCDEFF00AAA100 /* fitness_exporterLiveActivity */,
 			);
@@ -129,6 +162,7 @@
 			children = (
 				AC6C78492BAF905500E4A6C3 /* fitness_exporter.app */,
 				ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */,
+				ACF2C0013ABCDEFF00AAA300 /* fitness_exporterTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -136,6 +170,11 @@
 		AC6C784B2BAF905500E4A6C3 /* fitness_exporter */ = {
 			isa = PBXGroup;
 			children = (
+				ACF300013ABCDEFF00AAA700 /* BackgroundFileUpload.swift */,
+				ACF2F0013ABCDEFF00AAA600 /* ImmediateUploadQueue.swift */,
+				ACF2E0013ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift */,
+				ACF2D0013ABCDEFF00AAA400 /* UploadCompletionIndex.swift */,
+				ACF2B0013ABCDEFF00AAA200 /* RecordingReliability.swift */,
 				ACDEF2232F7777AA00BEEF01 /* UploadCore.swift */,
 				AC61D3682E558D5800BB53A3 /* UploadView.swift */,
 				ACF0E0012F77700100AAA111 /* HRVEventBridge.swift */,
@@ -160,7 +199,9 @@
 				ACC4F3382D19359E0059ADA2 /* CustomLogger.swift */,
 				ACE49DE02D0AAD970003EE5E /* AppDelegate.swift */,
 				AC6C785F2BAF98EB00E4A6C3 /* fitness-exporter-Info.plist */,
+				ACFA10023ABCDEFF00100002 /* fitness-exporter-Artem-Info.plist */,
 				AC6C785C2BAF94EE00E4A6C3 /* fitness_exporter.entitlements */,
+				ACFA10013ABCDEFF00100001 /* fitness_exporter.artem.entitlements */,
 				AC6C784C2BAF905500E4A6C3 /* fitness_exporterApp.swift */,
 				AC6C784E2BAF905500E4A6C3 /* ExportView.swift */,
 				AC6C78502BAF905700E4A6C3 /* Assets.xcassets */,
@@ -187,6 +228,14 @@
 				ACF1A0133ABCDEFF00AAA100 /* Info.plist */,
 			);
 			path = fitness_exporterLiveActivity;
+			sourceTree = "<group>";
+		};
+		ACF2C00B3ABCDEFF00AAA300 /* fitness_exporterTests */ = {
+			isa = PBXGroup;
+			children = (
+				ACF2C0023ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift */,
+			);
+			path = fitness_exporterTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -226,6 +275,24 @@
 			productReference = ACF1A00E3ABCDEFF00AAA100 /* fitness_exporterLiveActivity.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		ACF2C0073ABCDEFF00AAA300 /* fitness_exporterTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ACF2C0083ABCDEFF00AAA300 /* Build configuration list for PBXNativeTarget "fitness_exporterTests" */;
+			buildPhases = (
+				ACF2C0043ABCDEFF00AAA300 /* Sources */,
+				ACF2C0053ABCDEFF00AAA300 /* Frameworks */,
+				ACF2C0063ABCDEFF00AAA300 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				ACF2C00D3ABCDEFF00AAA300 /* PBXTargetDependency */,
+			);
+			name = fitness_exporterTests;
+			productName = fitness_exporterTests;
+			productReference = ACF2C0013ABCDEFF00AAA300 /* fitness_exporterTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -238,6 +305,10 @@
 				TargetAttributes = {
 					AC6C78482BAF905500E4A6C3 = {
 						CreatedOnToolsVersion = 15.3;
+					};
+					ACF2C0073ABCDEFF00AAA300 = {
+						CreatedOnToolsVersion = 17.0;
+						TestTargetID = AC6C78482BAF905500E4A6C3;
 					};
 				};
 			};
@@ -259,6 +330,7 @@
 			targets = (
 				AC6C78482BAF905500E4A6C3 /* fitness_exporter */,
 				ACF1A0073ABCDEFF00AAA100 /* fitness_exporterLiveActivity */,
+				ACF2C0073ABCDEFF00AAA300 /* fitness_exporterTests */,
 			);
 		};
 /* End PBXProject section */
@@ -275,6 +347,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ACF2C0063ABCDEFF00AAA300 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -282,6 +361,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ACF300023ABCDEFF00AAA700 /* BackgroundFileUpload.swift in Sources */,
+				ACF2F0023ABCDEFF00AAA600 /* ImmediateUploadQueue.swift in Sources */,
+				ACF2E0023ABCDEFF00AAA500 /* SensorBagBackfillIndex.swift in Sources */,
+				ACF2D0023ABCDEFF00AAA400 /* UploadCompletionIndex.swift in Sources */,
+				ACF2B0023ABCDEFF00AAA200 /* RecordingReliability.swift in Sources */,
 				ACDEF2242F7777AA00BEEF01 /* UploadCore.swift in Sources */,
 				ACF1A0013ABCDEFF00AAA100 /* ContinuousRecordingAttributes.swift in Sources */,
 				ACF0E0022F77700100AAA111 /* HRVEventBridge.swift in Sources */,
@@ -320,7 +404,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ACF2C0043ABCDEFF00AAA300 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ACF2C0033ABCDEFF00AAA300 /* SensorBagCompatibilityTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		ACF2C00D3ABCDEFF00AAA300 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AC6C78482BAF905500E4A6C3 /* fitness_exporter */;
+			targetProxy = ACF2C00C3ABCDEFF00AAA300 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AC6C78552BAF905700E4A6C3 /* Debug */ = {
@@ -440,9 +540,133 @@
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
+		};
+		ACFA20013ABCDEFF00200001 /* Artem Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter-my";
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "ARTEM_BUILD DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Artem Debug";
+		};
+		ACFA20023ABCDEFF00200002 /* Artem Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_BUNDLE_IDENTIFIER = "com.artemz.fitness-exporter-my";
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "ARTEM_BUILD $(inherited)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = "Artem Release";
 		};
 		AC6C78582BAF905700E4A6C3 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -536,17 +760,107 @@
 			};
 			name = Release;
 		};
+		ACFA21013ABCDEFF00210001 /* Artem Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = fitness_exporter/fitness_exporter.artem.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"fitness_exporter/Preview Content\"";
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "fitness-exporter-Artem-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "HK Export";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app connects to Polar H10 to measure heart rate variability.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is recorded with HRV sessions.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = "Artem Debug";
+		};
+		ACFA21023ABCDEFF00210002 /* Artem Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = fitness_exporter/fitness_exporter.artem.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"fitness_exporter/Preview Content\"";
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "fitness-exporter-Artem-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "HK Export";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app connects to Polar H10 to measure heart rate variability.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "We use HealthKit data to provide insights in the app.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is recorded with HRV sessions.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = "Artem Release";
+		};
 		ACF1A0053ABCDEFF00AAA100 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = fitness_exporter/fitness_exporter.entitlements;
+				CODE_SIGN_ENTITLEMENTS = fitness_exporterLiveActivity/fitness_exporterLiveActivity.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = EBA589ECLL;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -566,14 +880,14 @@
 		ACF1A0063ABCDEFF00AAA100 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = fitness_exporter/fitness_exporter.entitlements;
+				CODE_SIGN_ENTITLEMENTS = fitness_exporterLiveActivity/fitness_exporterLiveActivity.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = EBA589ECLL;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -590,6 +904,128 @@
 			};
 			name = Release;
 		};
+		ACFA22013ABCDEFF00220001 /* Artem Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = fitness_exporterLiveActivity/fitness_exporterLiveActivity.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).continuous-recording";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = "Artem Debug";
+		};
+		ACFA22023ABCDEFF00220002 /* Artem Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = fitness_exporterLiveActivity/fitness_exporterLiveActivity.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = fitness_exporterLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).continuous-recording";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = "Artem Release";
+		};
+		ACF2C0093ABCDEFF00AAA300 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = EBA589ECLL;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/fitness_exporter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/fitness_exporter";
+			};
+			name = Debug;
+		};
+		ACF2C00A3ABCDEFF00AAA300 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = EBA589ECLL;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/fitness_exporter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/fitness_exporter";
+			};
+			name = Release;
+		};
+		ACFA23013ABCDEFF00230001 /* Artem Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/fitness_exporter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/fitness_exporter";
+			};
+			name = "Artem Debug";
+		};
+		ACFA23023ABCDEFF00230002 /* Artem Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4A29MR88M9;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/fitness_exporter.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/fitness_exporter";
+			};
+			name = "Artem Release";
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -598,6 +1034,8 @@
 			buildConfigurations = (
 				AC6C78552BAF905700E4A6C3 /* Debug */,
 				AC6C78562BAF905700E4A6C3 /* Release */,
+				ACFA20013ABCDEFF00200001 /* Artem Debug */,
+				ACFA20023ABCDEFF00200002 /* Artem Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -607,6 +1045,8 @@
 			buildConfigurations = (
 				AC6C78582BAF905700E4A6C3 /* Debug */,
 				AC6C78592BAF905700E4A6C3 /* Release */,
+				ACFA21013ABCDEFF00210001 /* Artem Debug */,
+				ACFA21023ABCDEFF00210002 /* Artem Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -616,6 +1056,19 @@
 			buildConfigurations = (
 				ACF1A0053ABCDEFF00AAA100 /* Debug */,
 				ACF1A0063ABCDEFF00AAA100 /* Release */,
+				ACFA22013ABCDEFF00220001 /* Artem Debug */,
+				ACFA22023ABCDEFF00220002 /* Artem Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		ACF2C0083ABCDEFF00AAA300 /* Build configuration list for PBXNativeTarget "fitness_exporterTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ACF2C0093ABCDEFF00AAA300 /* Debug */,
+				ACF2C00A3ABCDEFF00AAA300 /* Release */,
+				ACFA23013ABCDEFF00230001 /* Artem Debug */,
+				ACFA23023ABCDEFF00230002 /* Artem Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

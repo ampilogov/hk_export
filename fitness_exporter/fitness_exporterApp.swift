@@ -8,6 +8,24 @@
 import SwiftUI
 import UIKit
 
+struct AppRecordingStatus: Equatable {
+    let startedAt: Date
+    let modeName: String
+}
+
+final class HRVSessionOwner: ObservableObject {
+    let manager: BluetoothManager
+    let continuousRecorder: ContinuousRecorder
+    let eventBridge: HRVEventBridge
+
+    init() {
+        let manager = BluetoothManager()
+        self.manager = manager
+        continuousRecorder = ContinuousRecorder(manager: manager)
+        eventBridge = HRVEventBridge(manager: manager)
+    }
+}
+
 @main
 struct fitness_exporterApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -23,6 +41,9 @@ struct fitness_exporterApp: App {
 
 struct ContentView: View {
     @State private var isProcessing: Bool = false
+    @State private var activeRecording: AppRecordingStatus?
+    @StateObject private var hrvSession = HRVSessionOwner()
+
     private enum Tab: Hashable {
         case export, upload, logs, settings, hrv
     }
@@ -48,23 +69,26 @@ struct ContentView: View {
                 }
                 .tag(Tab.logs)
 
-            SettingsView()
+            SettingsView(
+                isRecordingActive: activeRecording != nil,
+                isAppProcessing: isProcessing
+            )
                 .tabItem {
                     Label("Settings", systemImage: "gear")
                 }
                 .tag(Tab.settings)
 
-            HRVView(isProcessing: $isProcessing)
+            HRVView(
+                isProcessing: $isProcessing,
+                activeRecording: $activeRecording,
+                manager: hrvSession.manager,
+                continuousRecorder: hrvSession.continuousRecorder,
+                eventBridge: hrvSession.eventBridge
+            )
                 .tabItem {
                     Label("HRV", systemImage: "waveform.path.ecg")
                 }
                 .tag(Tab.hrv)
-        }
-        .blur(radius: (isProcessing && selection != .hrv) ? 1.0 : 0)
-        .onChange(of: selection) { newSelection in
-            if isProcessing && newSelection != .hrv {
-                selection = .hrv
-            }
         }
     }
 }

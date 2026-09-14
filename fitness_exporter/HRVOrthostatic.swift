@@ -12,6 +12,11 @@ import UserNotifications
 class OrthostaticHRV: NSObject {
     enum FinishReason { case user, timer }
 
+    enum Completion {
+        case completed([HRVStage: StageMetrics])
+        case discardedShortRecording
+    }
+
     enum Stage { case preLaying, laying, waitingForStanding, standing, cooldown, done }
 
     private let manager: BluetoothManager
@@ -32,9 +37,17 @@ class OrthostaticHRV: NSObject {
     private let stageSubject = PassthroughSubject<Stage, Never>()
     var stagePublisher: AnyPublisher<Stage, Never> { stageSubject.eraseToAnyPublisher() }
 
-    private let resultsSubject = PassthroughSubject<[HRVStage: StageMetrics], Never>()
-    var resultsPublisher: AnyPublisher<[HRVStage: StageMetrics], Never> {
-        resultsSubject.eraseToAnyPublisher()
+    private let completionSubject = PassthroughSubject<Completion, Never>()
+    var completionPublisher: AnyPublisher<Completion, Never> {
+        completionSubject.eraseToAnyPublisher()
+    }
+
+    private static let minimumManualRecordingDuration: TimeInterval = 10
+    private var startedAt: Date?
+
+    static func shouldDiscard(reason: FinishReason, elapsed: TimeInterval) -> Bool {
+        guard case .user = reason else { return false }
+        return elapsed < minimumManualRecordingDuration
     }
 
     init(
@@ -51,6 +64,7 @@ class OrthostaticHRV: NSObject {
 
     /// Starts the test; automatically transitions from laying to standing, then finishes.
     func start() {
+        startedAt = Date()
         CustomLogger.log(
             "Starting Orthostatic HRV test: warmup for \(warmupDuration) seconds, laying for \(layingDuration) seconds, standing for \(standingDuration) seconds, cooldown for \(cooldownDuration) seconds"
         )
@@ -125,13 +139,23 @@ class OrthostaticHRV: NSObject {
         }
 
         let bag = recorder.stop()
+        let elapsed = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+        startedAt = nil
+        if Self.shouldDiscard(reason: reason, elapsed: elapsed) {
+            CustomLogger.log(
+                "Discarded orthostatic recording stopped after "
+                    + String(format: "%.1f seconds", elapsed)
+            )
+            completionSubject.send(.discardedShortRecording)
+            return
+        }
         do {
             let fileURL = try SensorBagPersistence.save(bag, subdir: "orthostatic")
             CustomLogger.log("Saved orthostatic data to \(fileURL.path)")
             SensorBagPersistence.importSavedBagToHealthKit(
                 fileURL: fileURL,
                 profile: .orthostatic,
-                deviceName: manager.peripheral?.name
+                deviceName: manager.deviceName
             ) { result in
                 switch result {
                 case .imported, .alreadyPresent:
@@ -146,7 +170,7 @@ class OrthostaticHRV: NSObject {
             CustomLogger.log("Failed to save orthostatic data: \(error)")
         }
         let metrics = processSensorDataBag(bag)
-        resultsSubject.send(metrics)
+        completionSubject.send(.completed(metrics))
     }
 
     // Stage-specific filtering is performed locally as required.

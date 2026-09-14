@@ -88,8 +88,11 @@ struct LogView: View {
     // Function to fetch logs for a specific page
     private func fetchLogsForPage(page: Int) -> [(Date, String)] {
         let skip = (page - 1) * logsPerPage
-        let take = min(
-            logsPerPage, CustomLogger.getNumberOfLogsAvailable() - skip)
+        let take = max(
+            0,
+            min(logsPerPage, CustomLogger.getNumberOfLogsAvailable() - skip)
+        )
+        guard take > 0 else { return [] }
         return CustomLogger.retrieveLogs(maxLogs: take, skip: skip)
     }
 

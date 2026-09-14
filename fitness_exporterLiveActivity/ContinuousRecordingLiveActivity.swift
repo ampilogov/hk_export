@@ -10,6 +10,11 @@ struct ContinuousRecordingLiveActivity: Widget {
             VStack(alignment: .leading, spacing: 4) {
                 Text(context.attributes.name.isEmpty ? "HR Sensor" : context.attributes.name)
                     .font(.headline)
+                if context.isStale {
+                    Label("Recording status stale", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
                 HStack(spacing: 12) {
                     Label(Self.fmt(context.state.lastRR), systemImage: "waveform.path.ecg")
                     Label(Self.fmt(context.state.lastECG), systemImage: "bolt.heart")
@@ -32,23 +37,37 @@ struct ContinuousRecordingLiveActivity: Widget {
                     Label(Self.fmt(context.state.lastACC), systemImage: "figure.run")
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Label("Updated \(Self.maxStaleness(context.state))", systemImage: "clock")
+                    Label(
+                        context.isStale
+                            ? "Recording status stale"
+                            : "Updated \(Self.maxStaleness(context.state))",
+                        systemImage: context.isStale
+                            ? "exclamationmark.triangle.fill"
+                            : "clock"
+                    )
                         .font(.caption2)
+                        .foregroundStyle(context.isStale ? .red : .primary)
                 }
             } compactLeading: {
                 Image(systemName: "waveform.path.ecg")
             } compactTrailing: {
-                Text(Self.maxStalenessShort(context.state))
+                Text(context.isStale ? "!" : Self.maxStalenessShort(context.state))
+                    .foregroundStyle(context.isStale ? .red : .primary)
             } minimal: {
-                Image(systemName: "figure.run")
+                Image(
+                    systemName: context.isStale
+                        ? "exclamationmark.triangle.fill"
+                        : "figure.run"
+                )
+                .foregroundStyle(context.isStale ? .red : .primary)
             }
         }
     }
 
     private static func fmt(_ date: Date?) -> String {
-        guard let d = date else { return "--" }
-        let s = max(0, Int(Date().timeIntervalSince(d)))
-        return "\(s)s"
+        guard let date else { return "--" }
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        return "\(seconds)s"
     }
 
     private static func elapsed(_ seconds: Int) -> String {
@@ -58,7 +77,9 @@ struct ContinuousRecordingLiveActivity: Widget {
         return String(format: "%02d:%02d", mm, ss)
     }
 
-    private static func maxStaleness(_ state: ContinuousRecordingAttributes.ContentState) -> String {
+    private static func maxStaleness(
+        _ state: ContinuousRecordingAttributes.ContentState
+    ) -> String {
         let now = Date()
         let ages = [state.lastRR, state.lastECG, state.lastACC]
             .compactMap { $0 }
@@ -67,7 +88,9 @@ struct ContinuousRecordingLiveActivity: Widget {
         return "\(maxAge)s"
     }
 
-    private static func maxStalenessShort(_ state: ContinuousRecordingAttributes.ContentState) -> String {
+    private static func maxStalenessShort(
+        _ state: ContinuousRecordingAttributes.ContentState
+    ) -> String {
         let now = Date()
         let ages = [state.lastRR, state.lastECG, state.lastACC]
             .compactMap { $0 }

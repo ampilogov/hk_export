@@ -4,20 +4,119 @@ import Foundation
 import SwiftUI
 import UserNotifications
 import UIKit
-import HealthKit
 
 // Live Activity attributes moved to ContinuousRecordingAttributes.swift shared by app and widget.
+
+private final class BackgroundTaskToken {
+    var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    func end() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [self] in self.end() }
+            return
+        }
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+
+enum RecordingInterruptionTiming {
+    static func estimatedStart(
+        detectedAt: Date,
+        alreadyMissingFor elapsed: TimeInterval
+    ) -> Date {
+        detectedAt.addingTimeInterval(-max(0, elapsed))
+    }
+
+    static func durationMilliseconds(from start: Date, to end: Date) -> Int {
+        max(0, Int(end.timeIntervalSince(start) * 1_000))
+    }
+}
 
 /// Handles periodic recording of raw sensor data and updates a Live Activity
 /// with the latest reception timestamps for RR/ECG/ACC streams.
 final class ContinuousRecorder: ObservableObject {
+    struct RecordingAttention: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+        let offersWriteRetry: Bool
+        let endedRecording: Bool
+        let interruptedSessionID: UUID?
+
+        init(
+            title: String,
+            message: String,
+            offersWriteRetry: Bool,
+            endedRecording: Bool,
+            interruptedSessionID: UUID? = nil
+        ) {
+            self.title = title
+            self.message = message
+            self.offersWriteRetry = offersWriteRetry
+            self.endedRecording = endedRecording
+            self.interruptedSessionID = interruptedSessionID
+        }
+    }
+
+    private struct PendingHealthKitImport {
+        let fileURL: URL
+        let deviceName: String?
+    }
+
+    private struct PendingBatch {
+        let recordingID: UUID
+        let bag: SensorBag
+        let deviceName: String?
+    }
+
+    private struct PersistedBatch {
+        let fileURL: URL
+        let immediateUploadQueueError: String?
+    }
+
+    private struct ActiveInterruption {
+        let missingSince: Date
+        let reason: String
+    }
+
+    private struct IngestionState {
+        var recordingID: UUID?
+        var lastRR: Date?
+        var lastECG: Date?
+        var lastACC: Date?
+    }
+
+    private struct IngestionSnapshot {
+        let recordingID: UUID
+        let lastRR: Date?
+        let lastECG: Date?
+        let lastACC: Date?
+    }
+
+    private static let liveActivityMinimumUpdateInterval: TimeInterval = 30
+    private static let watchdogRefreshInterval: TimeInterval = 60
+    private static let recordingHealthRefreshInterval: TimeInterval = 5
+    private static let healthyStreamMaximumAge: TimeInterval = 15
+    private static let staleStreamMaximumAge: TimeInterval = 10
+
     private let manager: BluetoothManager
     private let recorder = SensorBagRecorder()
+    private let watchdog = RecordingWatchdog()
+    private let interruptionNotifier = RecordingInterruptionNotifier()
+    private let ingestionQueue = DispatchQueue(
+        label: "com.fitness_exporter.continuousIngestion",
+        qos: .utility
+    )
+    private let fileWriteQueue = DispatchQueue(
+        label: "com.fitness_exporter.continuousFileWriter",
+        qos: .utility
+    )
     private var subscriptions = Set<AnyCancellable>()
     /// Drives switching between write-on and write-off windows
     private var sessionTimer: Timer?
     private var staleTimer: Timer?
-    private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var activity: Activity<ContinuousRecordingAttributes>?
     private var activityStateTask: Task<Void, Never>?
     private var isRunning = false
@@ -25,18 +124,64 @@ final class ContinuousRecorder: ObservableObject {
     private var durationSeconds = 0
     private var intervalSeconds = 0
     private var captureStart: Date?
+    private var lastRRReceivedAt: Date?
+    private var lastECGReceivedAt: Date?
+    private var lastACCReceivedAt: Date?
+    private var lastLiveActivityUpdateAt: Date?
+    private var activeRecordingID: UUID?
+    private var healthKitImports: [PendingHealthKitImport] = []
+    private var healthKitImportInFlight = false
+    private var ingestionState = IngestionState()
+    private var discardBufferedEventsAtNextWindowStart = false
+    private var lastWatchdogRefreshAt: Date?
+    private var lastWatchdogRR: Date?
+    private var lastWatchdogECG: Date?
+    private var lastWatchdogACC: Date?
+    private var pendingWriteCounts: [UUID: Int] = [:]
+    private var retainedBatches: [PendingBatch] = []
+    private var sessionsAwaitingFinalization = Set<UUID>()
+    private var activeInterruption: ActiveInterruption?
+    private var restartRequestedStreams = Set<SensorStreamKind>()
 
     /// Last reception timestamps for each sensor stream.
     @Published var lastRR: Date?
     @Published var lastECG: Date?
     @Published var lastACC: Date?
+    @Published private(set) var attention: RecordingAttention?
+    @Published private(set) var interruptionMessage: String?
 
     init(manager: BluetoothManager) {
         self.manager = manager
+        if let interrupted = RecordingSessionJournal.interruptedSessionForCurrentProcess() {
+            let savedDescription = interrupted.lastSavedFileName.map {
+                " The last completed file was \($0)."
+            } ?? " No completed-file checkpoint was recorded."
+            attention = RecordingAttention(
+                title: "Recording ended unexpectedly",
+                message:
+                    "A recording started at \(interrupted.startedAt.formatted()) did not stop normally."
+                    + savedDescription
+                    + " The unfinished in-memory window may be incomplete.",
+                offersWriteRetry: false,
+                endedRecording: true,
+                interruptedSessionID: interrupted.sessionID
+            )
+            watchdog.cancelObsoleteAlert()
+        }
     }
 
     /// Start continuous capture; timers only control batch writes.
     func start(durationSeconds: Int, intervalSeconds: Int) {
+        guard retainedBatches.isEmpty else {
+            attention = RecordingAttention(
+                title: "Unsaved recording data",
+                message:
+                    "Retry saving the retained recording batches before starting another session.",
+                offersWriteRetry: true,
+                endedRecording: true
+            )
+            return
+        }
         self.durationSeconds = durationSeconds
         self.intervalSeconds = intervalSeconds
         guard !isRunning else {
@@ -51,6 +196,15 @@ final class ContinuousRecorder: ObservableObject {
 
     /// Stop timers and continuous capture. Optionally flush current write window.
     func stop() {
+        guard isRunning else { return }
+        guard let recordingID = activeRecordingID else { return }
+        manager.drainPendingSensorEvents()
+        let finalSnapshot = drainIngestion()
+        closeInterruptionForStop(at: Date())
+        subscriptions.removeAll()
+        if let finalSnapshot {
+            applyIngestionSnapshot(finalSnapshot, requireRunning: false)
+        }
         isRunning = false
         sessionTimer?.invalidate()
         sessionTimer = nil
@@ -60,84 +214,420 @@ final class ContinuousRecorder: ObservableObject {
         if isWriteWindow {
             flushCurrentBatch()
         }
+        sessionsAwaitingFinalization.insert(recordingID)
+        watchdog.stop(sessionID: recordingID, clearJournal: false)
         endContinuousCapture()
+        finishSessionIfPossible(recordingID)
+    }
+
+    func dismissAttention() {
+        if let sessionID = attention?.interruptedSessionID {
+            RecordingSessionJournal.acknowledgeLaunchInterruption(
+                sessionID: sessionID)
+        }
+        attention = nil
+    }
+
+    /// Load a short ECG neighborhood without touching the active writer or
+    /// changing the on-disk recording format. The unfinished bag is copied on
+    /// the ingestion queue; file discovery and decoding stay off that queue.
+    func loadECGWindow(
+        centeredAt center: Date,
+        halfWidth: TimeInterval = 30,
+        completion: @escaping (Result<[ECGPlotPoint], Error>) -> Void
+    ) {
+        ingestionQueue.async { [weak self] in
+            let liveEvents = self?.recorder.snapshot() ?? []
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result {
+                    try SensorBagPersistence.loadECGWindow(
+                        centeredAt: center,
+                        halfWidth: halfWidth,
+                        liveEvents: liveEvents
+                    )
+                }
+                DispatchQueue.main.async {
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    func retryFailedWrites() {
+        guard !retainedBatches.isEmpty else { return }
+        let batches = retainedBatches
+        retainedBatches.removeAll()
+        attention = nil
+        for batch in batches {
+            enqueuePersistence(batch)
+        }
     }
 
     // MARK: - Continuous capture lifecycle
     private func beginContinuousCapture() {
-        captureStart = Date()
+        let start = Date()
+        captureStart = start
+        lastRR = nil
+        lastECG = nil
+        lastACC = nil
+        lastRRReceivedAt = nil
+        lastECGReceivedAt = nil
+        lastACCReceivedAt = nil
+        lastLiveActivityUpdateAt = nil
+        lastWatchdogRefreshAt = nil
+        lastWatchdogRR = nil
+        lastWatchdogECG = nil
+        lastWatchdogACC = nil
+        activeInterruption = nil
+        restartRequestedStreams.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.cancelAll()
+        let recordingID = UUID()
+        activeRecordingID = recordingID
+        CustomLogger.log(
+            "[Continuous][Started] session=\(recordingID.uuidString) "
+                + "window=\(durationSeconds)s interval=\(intervalSeconds)s "
+                + "watchdog=\(Int(watchdog.delay))s"
+        )
         recorder.reset()
-        recorder.start(with: manager)
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "ContinuousRecording")
-        subscribe()
+        resetIngestion(for: recordingID)
+        discardBufferedEventsAtNextWindowStart = false
+        subscribe(recordingID: recordingID)
+        watchdog.start(sessionID: recordingID, startedAt: start) { [weak self] message in
+            self?.attention = RecordingAttention(
+                title: "Recording alerts unavailable",
+                message: message,
+                offersWriteRetry: false,
+                endedRecording: false
+            )
+        }
         startLiveActivityIfNeeded()
         startStaleTimer()
     }
 
     private func endContinuousCapture() {
         subscriptions.removeAll()
-        let _ = recorder.stop()
-        if bgTask != .invalid {
-            UIApplication.shared.endBackgroundTask(bgTask)
-            bgTask = .invalid
-        }
+        interruptionNotifier.cancelAll()
+        activeInterruption = nil
+        restartRequestedStreams.removeAll()
+        interruptionMessage = nil
         endLiveActivity()
+        activeRecordingID = nil
     }
 
     private func startStaleTimer() {
         staleTimer?.invalidate()
-        staleTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        staleTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.recordingHealthRefreshInterval,
+            repeats: true
+        ) { _ in
             self.checkStaleness()
         }
     }
 
     private func checkStaleness() {
+        guard isRunning, let captureStart else { return }
         let now = Date()
-        if let last = lastRR, now.timeIntervalSince(last) > 10 {
-            notify(title: "RR data stale", body: "No RR data for 10s")
-            staleTimer?.invalidate()
+        if let snapshot = drainIngestion() {
+            applyIngestionSnapshot(snapshot)
         }
-        if let last = lastECG, now.timeIntervalSince(last) > 10 {
-            notify(title: "ECG data stale", body: "No ECG data for 10s")
-            staleTimer?.invalidate()
+        guard now.timeIntervalSince(captureStart) >= Self.staleStreamMaximumAge else {
+            return
         }
-        if let last = lastACC, now.timeIntervalSince(last) > 10 {
-            notify(title: "ACC data stale", body: "No ACC data for 10s")
-            staleTimer?.invalidate()
+
+        let lastReceived: [(SensorStreamKind, Date?)] = [
+            (.hr, lastRRReceivedAt),
+            (.ecg, lastECGReceivedAt),
+            (.acc, lastACCReceivedAt),
+        ]
+        let stale = lastReceived.compactMap {
+            stream, lastSeen -> (stream: SensorStreamKind, age: TimeInterval)? in
+                let age = now.timeIntervalSince(lastSeen ?? captureStart)
+                return age > Self.staleStreamMaximumAge
+                    ? (stream, age) : nil
+            }
+        let staleStreams = Set(stale.map { $0.stream })
+
+        if staleStreams.isEmpty {
+            resolveInterruptionIfHealthy(at: now)
+        } else {
+            let names = staleStreams.map(\.rawValue).sorted().joined(separator: ", ")
+            beginInterruption(
+                reason: "no recent \(names) data",
+                restartStreams: staleStreams,
+                at: now,
+                notificationElapsed: stale.map { $0.age }.max() ?? 0
+            )
         }
     }
 
-    private func subscribe() {
+    private func handleLifecycleEvent(_ event: BluetoothLifecycleEvent) {
+        guard isRunning else { return }
+        let now = Date()
+        switch event {
+        case .disconnected(_, let pairingError):
+            beginInterruption(
+                reason: pairingError ? "Polar pairing error" : "Polar disconnected",
+                at: now
+            )
+        case .streamFailed(let stream, _, let message):
+            beginInterruption(
+                reason: "\(stream.rawValue.uppercased()) stream failed: \(message)",
+                at: now
+            )
+        case .connectionFailed(let message):
+            beginInterruption(
+                reason: "Polar connection failed: \(message)",
+                at: now
+            )
+        case .streamReady:
+            if let snapshot = drainIngestion() {
+                applyIngestionSnapshot(snapshot)
+            }
+            resolveInterruptionIfHealthy(at: now)
+        case .connecting, .connected:
+            break
+        }
+    }
+
+    private func beginInterruption(
+        reason: String,
+        restartStreams: Set<SensorStreamKind> = [],
+        at date: Date,
+        notificationElapsed: TimeInterval = 0
+    ) {
+        guard let recordingID = activeRecordingID else { return }
+
+        for stream in restartStreams
+        where restartRequestedStreams.insert(stream).inserted {
+            manager.restartStream(stream, reason: "No data received for 10 seconds")
+        }
+
+        let estimatedStart = RecordingInterruptionTiming.estimatedStart(
+            detectedAt: date,
+            alreadyMissingFor: notificationElapsed
+        )
+        if let interruption = activeInterruption {
+            if estimatedStart < interruption.missingSince {
+                activeInterruption = ActiveInterruption(
+                    missingSince: estimatedStart,
+                    reason: interruption.reason
+                )
+            }
+            return
+        }
+        let safeReason = reason.replacingOccurrences(of: "\n", with: " ")
+        interruptionMessage = safeReason
+        activeInterruption = ActiveInterruption(
+            missingSince: estimatedStart,
+            reason: safeReason
+        )
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_start reason=\(safeReason.prefix(160))",
+                at: date
+            )
+        }
+        if isWriteWindow {
+            flushCurrentBatch()
+        }
+        interruptionNotifier.begin(
+            sessionID: recordingID,
+            reason: safeReason,
+            elapsed: notificationElapsed
+        ) { [weak self] message in
+            self?.attention = RecordingAttention(
+                title: "Recording alert failed",
+                message: message,
+                offersWriteRetry: false,
+                endedRecording: false
+            )
+        }
+        CustomLogger.log("[Continuous][Interrupted] \(safeReason)")
+    }
+
+    private func resolveInterruptionIfHealthy(at date: Date) {
+        guard
+            let recordingID = activeRecordingID,
+            let interruption = activeInterruption,
+            manager.isReadyForRecording,
+            let rr = lastRRReceivedAt,
+            let ecg = lastECGReceivedAt,
+            let acc = lastACCReceivedAt,
+            date.timeIntervalSince(rr) <= Self.healthyStreamMaximumAge,
+            date.timeIntervalSince(ecg) <= Self.healthyStreamMaximumAge,
+            date.timeIntervalSince(acc) <= Self.healthyStreamMaximumAge
+        else {
+            return
+        }
+
+        let durationMilliseconds = RecordingInterruptionTiming.durationMilliseconds(
+            from: interruption.missingSince,
+            to: date
+        )
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_end duration_ms=\(durationMilliseconds)",
+                at: date
+            )
+        }
+        activeInterruption = nil
+        restartRequestedStreams.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.resolve(sessionID: recordingID)
+        CustomLogger.log(
+            "[Continuous][Recovered] All required streams healthy after "
+                + "\(durationMilliseconds)ms (\(interruption.reason))"
+        )
+    }
+
+    private func closeInterruptionForStop(at date: Date) {
+        guard
+            let recordingID = activeRecordingID,
+            let interruption = activeInterruption
+        else {
+            interruptionNotifier.cancelAll()
+            return
+        }
+        let durationMilliseconds = RecordingInterruptionTiming.durationMilliseconds(
+            from: interruption.missingSince,
+            to: date
+        )
+        ingestionQueue.sync {
+            recorder.markCustomEvent(
+                "system.continuous_gap_end duration_ms=\(durationMilliseconds) status=recording_stopped",
+                at: date
+            )
+        }
+        activeInterruption = nil
+        restartRequestedStreams.removeAll()
+        interruptionMessage = nil
+        interruptionNotifier.resolve(sessionID: recordingID)
+    }
+
+    private func subscribe(recordingID: UUID) {
         subscriptions.removeAll()
         manager.sensorPublisher
-            .receive(on: DispatchQueue.main)
+            .receive(on: ingestionQueue)
             .sink { [weak self] event in
-                guard let self = self else { return }
-                let now = Date()
-                var didUpdate = false
-                switch event.data {
-                case .hrSamples:
-                    self.lastRR = now
-                    didUpdate = true
-                case .ecgSamples:
-                    self.lastECG = now
-                    didUpdate = true
-                case .accSamples:
-                    self.lastACC = now
-                    didUpdate = true
-                default:
-                    break
-                }
-                if didUpdate { self.updateLiveActivity() }
+                self?.ingest(event, recordingID: recordingID)
             }
             .store(in: &subscriptions)
 
-        manager.disconnectPublisher
+        manager.lifecyclePublisher
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.notify(title: "Connection lost", body: "Peripheral disconnected")
+            .sink { [weak self] event in
+                self?.handleLifecycleEvent(event)
             }
             .store(in: &subscriptions)
+    }
+
+    private func resetIngestion(for recordingID: UUID) {
+        ingestionQueue.sync {
+            ingestionState = IngestionState(recordingID: recordingID)
+        }
+    }
+
+    private func ingest(_ event: SensorEvent, recordingID: UUID) {
+        guard ingestionState.recordingID == recordingID else { return }
+
+        // This is the only continuous-recording append path. It runs on the
+        // serial ingestion queue, preserving the publisher's packet order.
+        recorder.record(event)
+
+        switch event.data {
+        case .hrSamples:
+            if event.recordingHealthStream == .hr {
+                ingestionState.lastRR = event.timestamp
+            }
+        case .ecgSamples:
+            if event.recordingHealthStream == .ecg {
+                ingestionState.lastECG = event.timestamp
+            }
+        case .accSamples:
+            if event.recordingHealthStream == .acc {
+                ingestionState.lastACC = event.timestamp
+            }
+        default:
+            break
+        }
+    }
+
+    private func makeIngestionSnapshot() -> IngestionSnapshot? {
+        guard let recordingID = ingestionState.recordingID else { return nil }
+        return IngestionSnapshot(
+            recordingID: recordingID,
+            lastRR: ingestionState.lastRR,
+            lastECG: ingestionState.lastECG,
+            lastACC: ingestionState.lastACC
+        )
+    }
+
+    @discardableResult
+    private func drainIngestion() -> IngestionSnapshot? {
+        ingestionQueue.sync {
+            return makeIngestionSnapshot()
+        }
+    }
+
+    private func applyIngestionSnapshot(
+        _ snapshot: IngestionSnapshot,
+        requireRunning: Bool = true
+    ) {
+        guard activeRecordingID == snapshot.recordingID else { return }
+        guard !requireRunning || isRunning else { return }
+
+        lastRRReceivedAt = snapshot.lastRR
+        lastECGReceivedAt = snapshot.lastECG
+        lastACCReceivedAt = snapshot.lastACC
+        lastRR = snapshot.lastRR
+        lastECG = snapshot.lastECG
+        lastACC = snapshot.lastACC
+
+        if snapshot.lastRR != nil || snapshot.lastECG != nil || snapshot.lastACC != nil {
+            let now = Date()
+            resolveInterruptionIfHealthy(at: now)
+            refreshWatchdogIfHealthy(snapshot: snapshot, at: now)
+            updateLiveActivityIfDue(at: now)
+        }
+    }
+
+    private func refreshWatchdogIfHealthy(
+        snapshot: IngestionSnapshot,
+        at now: Date
+    ) {
+        guard isRunning else { return }
+        guard
+            let rr = snapshot.lastRR,
+            let ecg = snapshot.lastECG,
+            let acc = snapshot.lastACC,
+            now.timeIntervalSince(rr) <= Self.healthyStreamMaximumAge,
+            now.timeIntervalSince(ecg) <= Self.healthyStreamMaximumAge,
+            now.timeIntervalSince(acc) <= Self.healthyStreamMaximumAge
+        else {
+            return
+        }
+
+        if let lastWatchdogRefreshAt,
+            now.timeIntervalSince(lastWatchdogRefreshAt)
+                < Self.watchdogRefreshInterval
+        {
+            return
+        }
+
+        if let previousRR = lastWatchdogRR,
+            let previousECG = lastWatchdogECG,
+            let previousACC = lastWatchdogACC,
+            (rr <= previousRR || ecg <= previousECG || acc <= previousACC)
+        {
+            return
+        }
+
+        lastWatchdogRefreshAt = now
+        lastWatchdogRR = rr
+        lastWatchdogECG = ecg
+        lastWatchdogACC = acc
+        watchdog.refresh(sessionID: snapshot.recordingID)
     }
 
     // MARK: - Write window scheduling
@@ -150,8 +640,14 @@ final class ContinuousRecorder: ObservableObject {
 
     private func startWriteWindow() {
         isWriteWindow = true
-        // Start a fresh batch for this window
-        recorder.reset()
+        if discardBufferedEventsAtNextWindowStart {
+            // Put the reset in the same ordering domain as incoming packets so
+            // a packet cannot race across the start of the requested window.
+            ingestionQueue.sync {
+                recorder.reset()
+            }
+            discardBufferedEventsAtNextWindowStart = false
+        }
         sessionTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(durationSeconds), repeats: false) { [weak self] _ in
             self?.endWriteWindow()
         }
@@ -161,32 +657,270 @@ final class ContinuousRecorder: ObservableObject {
         isWriteWindow = false
         flushCurrentBatch()
         let off = max(0, intervalSeconds - durationSeconds)
+        discardBufferedEventsAtNextWindowStart = off > 0
+        if off == 0 {
+            // Continuous mode has no off-window. Mark the new bag active in
+            // this same run-loop turn so Stop cannot skip its final contents.
+            startWriteWindow()
+            return
+        }
         sessionTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(off), repeats: false) { [weak self] _ in
             self?.startWriteWindow()
         }
     }
 
     private func flushCurrentBatch() {
-        let bag = recorder.takeAndReset()
-        if let fileURL = try? SensorBagPersistence.save(bag, subdir: "continuous") {
-            SensorBagPersistence.importSavedBagToHealthKit(
-                fileURL: fileURL,
-                profile: .continuous,
-                deviceName: manager.peripheral?.name
-            ) { result in
-                if case .failed(let message) = result {
-                    CustomLogger.log("[SensorBag][HK] Continuous import failed for \(fileURL.lastPathComponent): \(message)")
+        guard let recordingID = activeRecordingID else { return }
+        // Rotate the bag on the ingestion queue. Every packet accepted before
+        // this boundary lands in this file; every later packet lands in the
+        // next one.
+        let bag = ingestionQueue.sync {
+            recorder.takeAndReset()
+        }
+        guard !bag.isEmpty else { return }
+        enqueuePersistence(
+            PendingBatch(
+                recordingID: recordingID,
+                bag: bag,
+                deviceName: manager.deviceName
+            ))
+    }
+
+    private func enqueuePersistence(_ batch: PendingBatch) {
+        pendingWriteCounts[batch.recordingID, default: 0] += 1
+        let finalizationTask = beginFileFinalizationTask()
+
+        fileWriteQueue.async { [weak self] in
+            let result: Result<PersistedBatch, Error>
+            do {
+                let fileURL = try SensorBagPersistence.save(
+                    batch.bag,
+                    subdir: "continuous"
+                )
+                let queueError: String?
+                do {
+                    try ImmediateUploadService.shared.enqueue(fileURL: fileURL)
+                    queueError = nil
+                } catch {
+                    // The source file is already durable. Do not turn a
+                    // downstream queue failure into another file write.
+                    queueError = error.localizedDescription
                 }
+                result = .success(
+                    PersistedBatch(
+                        fileURL: fileURL,
+                        immediateUploadQueueError: queueError
+                    )
+                )
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                finalizationTask.end()
+                guard let self else { return }
+                self.completePersistence(batch: batch, result: result)
             }
         }
     }
 
-    private func notify(title: String, body: String) {
+    private func completePersistence(
+        batch: PendingBatch,
+        result: Result<PersistedBatch, Error>
+    ) {
+        let remaining = max(0, (pendingWriteCounts[batch.recordingID] ?? 1) - 1)
+        if remaining == 0 {
+            pendingWriteCounts.removeValue(forKey: batch.recordingID)
+        } else {
+            pendingWriteCounts[batch.recordingID] = remaining
+        }
+
+        switch result {
+        case .success(let persisted):
+            let fileURL = persisted.fileURL
+            watchdog.checkpoint(sessionID: batch.recordingID, fileURL: fileURL)
+            let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                .map(String.init) ?? "unknown"
+            CustomLogger.log(
+                "[Continuous][File] session=\(batch.recordingID.uuidString) "
+                    + "name=\(fileURL.lastPathComponent) bytes=\(fileSize) "
+                    + "upload_queued=\(persisted.immediateUploadQueueError == nil)"
+            )
+            if let queueError = persisted.immediateUploadQueueError {
+                notify(
+                    title: "Recording upload queue failed",
+                    body: "The recording was saved, but its upload needs attention.",
+                    identifier: "ContinuousRecording.UploadQueueFailure"
+                )
+                showImmediateUploadError(
+                    "The recording file was saved, but its upload could not be queued: "
+                        + queueError
+                )
+            } else {
+                ImmediateUploadService.shared.resume { [weak self] error in
+                    guard let error else { return }
+                    self?.showImmediateUploadError(
+                        "The recording file remains queued, but its immediate upload failed: "
+                            + error
+                    )
+                }
+            }
+            enqueueHealthKitImport(
+                fileURL: fileURL,
+                deviceName: batch.deviceName
+            )
+        case .failure(let error):
+            retainedBatches.append(batch)
+            sessionsAwaitingFinalization.insert(batch.recordingID)
+            let endedCurrentRecording = stopAfterPersistenceFailure(
+                recordingID: batch.recordingID)
+            let message =
+                "Could not save a continuous-recording batch: \(error.localizedDescription). "
+                + (endedCurrentRecording
+                    ? "Recording was stopped and the unsaved batches are retained in memory for retry."
+                    : "The unsaved batch is retained in memory for retry.")
+            CustomLogger.log("[Continuous][Error] \(message)")
+            notify(
+                title: "Recording save failed",
+                body: "Open the app and retry saving the retained recording data.",
+                identifier: "ContinuousRecording.FileWriteFailure"
+            )
+            attention = RecordingAttention(
+                title: "Recording save failed",
+                message: message,
+                offersWriteRetry: true,
+                endedRecording: endedCurrentRecording
+            )
+        }
+
+        finishSessionIfPossible(batch.recordingID)
+    }
+
+    private func showImmediateUploadError(_ message: String) {
+        CustomLogger.log("[Continuous][Upload][Error] \(message)")
+        attention = RecordingAttention(
+            title: "Recording upload pending",
+            message: message,
+            offersWriteRetry: false,
+            endedRecording: false
+        )
+    }
+
+    private func stopAfterPersistenceFailure(recordingID: UUID) -> Bool {
+        guard activeRecordingID == recordingID, isRunning else { return false }
+        manager.drainPendingSensorEvents()
+        _ = drainIngestion()
+        subscriptions.removeAll()
+        isRunning = false
+        isWriteWindow = false
+        sessionTimer?.invalidate()
+        sessionTimer = nil
+        staleTimer?.invalidate()
+        staleTimer = nil
+
+        let currentBag = ingestionQueue.sync {
+            recorder.takeAndReset()
+        }
+        if !currentBag.isEmpty {
+            retainedBatches.append(
+                PendingBatch(
+                    recordingID: recordingID,
+                    bag: currentBag,
+                    deviceName: manager.deviceName
+                ))
+        }
+        endContinuousCapture()
+        return true
+    }
+
+    private func finishSessionIfPossible(_ recordingID: UUID) {
+        guard sessionsAwaitingFinalization.contains(recordingID) else { return }
+        guard pendingWriteCounts[recordingID] == nil else { return }
+        guard !retainedBatches.contains(where: { $0.recordingID == recordingID }) else {
+            return
+        }
+        sessionsAwaitingFinalization.remove(recordingID)
+        RecordingSessionJournal.end(sessionID: recordingID)
+        watchdog.stop(sessionID: recordingID, clearJournal: false)
+        CustomLogger.log(
+            "[Continuous][Finalized] session=\(recordingID.uuidString)"
+        )
+    }
+
+    private func beginFileFinalizationTask() -> BackgroundTaskToken {
+        let token = BackgroundTaskToken()
+        token.identifier = UIApplication.shared.beginBackgroundTask(
+            withName: "ContinuousRecording.FileFinalization"
+        ) { [weak token] in
+            CustomLogger.log(
+                "[Continuous] File-finalization background time expired"
+            )
+            token?.end()
+        }
+        return token
+    }
+
+    private func enqueueHealthKitImport(fileURL: URL, deviceName: String?) {
+        healthKitImports.append(
+            PendingHealthKitImport(
+                fileURL: fileURL,
+                deviceName: deviceName
+            ))
+        startNextHealthKitImportIfNeeded()
+    }
+
+    private func startNextHealthKitImportIfNeeded() {
+        guard !healthKitImportInFlight, !healthKitImports.isEmpty else { return }
+        healthKitImportInFlight = true
+        let pending = healthKitImports.removeFirst()
+
+        SensorBagPersistence.importSavedBagToHealthKit(
+            fileURL: pending.fileURL,
+            profile: .continuous,
+            deviceName: pending.deviceName,
+            mode: .newFile
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .failed(let message) = result {
+                CustomLogger.log(
+                    "[SensorBag][HK] Continuous import failed for "
+                        + "\(pending.fileURL.lastPathComponent): \(message)")
+            }
+            self.healthKitImportInFlight = false
+            self.startNextHealthKitImportIfNeeded()
+        }
+    }
+
+    private func notify(
+        title: String,
+        body: String,
+        identifier: String = UUID().uuidString
+    ) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: identifier,
+                content: content,
+                trigger: nil
+            )
+        ) { [weak self] error in
+            guard let error else { return }
+            let message =
+                "Could not deliver \(identifier): \(error.localizedDescription)"
+            CustomLogger.log("[Continuous][Notification][Error] \(message)")
+            DispatchQueue.main.async {
+                guard let self, self.attention == nil else { return }
+                self.attention = RecordingAttention(
+                    title: "Recording alert failed",
+                    message: message,
+                    offersWriteRetry: false,
+                    endedRecording: false
+                )
+            }
+        }
     }
 
     // MARK: - Live Activity
@@ -196,10 +930,16 @@ final class ContinuousRecorder: ObservableObject {
             CustomLogger.log("Live Activities are not enabled (capability or widget missing)")
             return
         }
-        let attributes = ContinuousRecordingAttributes(name: manager.peripheral?.name ?? "")
+        let attributes = ContinuousRecordingAttributes(name: manager.deviceName ?? "")
         let state = ContinuousRecordingAttributes.ContentState(lastRR: nil, lastECG: nil, lastACC: nil, elapsedSeconds: 0)
         do {
-            activity = try Activity.request(attributes: attributes, contentState: state)
+            activity = try Activity.request(
+                attributes: attributes,
+                content: ActivityContent(
+                    state: state,
+                    staleDate: liveActivityStaleDate
+                )
+            )
             // Observe state and re-request if user dismisses while running
             if let activity = activity {
                 activityStateTask?.cancel()
@@ -231,13 +971,32 @@ final class ContinuousRecorder: ObservableObject {
         }
     }
 
+    private func updateLiveActivityIfDue(at now: Date) {
+        if let lastLiveActivityUpdateAt,
+            now.timeIntervalSince(lastLiveActivityUpdateAt)
+                < Self.liveActivityMinimumUpdateInterval
+        {
+            return
+        }
+        lastLiveActivityUpdateAt = now
+        updateLiveActivity()
+    }
+
+    private var liveActivityStaleDate: Date? {
+        (lastWatchdogRefreshAt ?? captureStart)?.addingTimeInterval(watchdog.delay)
+    }
+
     @available(iOS 16.1, *)
     private func updateLiveActivity() {
         if activity == nil { startLiveActivityIfNeeded() }
         guard let activity = activity else { return }
         let elapsed = captureStart.map { max(0, Int(Date().timeIntervalSince($0))) } ?? 0
         let state = ContinuousRecordingAttributes.ContentState(lastRR: lastRR, lastECG: lastECG, lastACC: lastACC, elapsedSeconds: elapsed)
-        Task { await activity.update(using: state) }
+        let content = ActivityContent(
+            state: state,
+            staleDate: liveActivityStaleDate
+        )
+        Task { await activity.update(content) }
     }
 
     @available(iOS 16.1, *)
@@ -245,7 +1004,21 @@ final class ContinuousRecorder: ObservableObject {
         activityStateTask?.cancel()
         activityStateTask = nil
         guard let activity = activity else { return }
-        Task { await activity.end(dismissalPolicy: .immediate) }
+        let elapsed = captureStart.map {
+            max(0, Int(Date().timeIntervalSince($0)))
+        } ?? 0
+        let state = ContinuousRecordingAttributes.ContentState(
+            lastRR: lastRR,
+            lastECG: lastECG,
+            lastACC: lastACC,
+            elapsedSeconds: elapsed
+        )
+        Task {
+            await activity.end(
+                ActivityContent(state: state, staleDate: nil),
+                dismissalPolicy: .immediate
+            )
+        }
         self.activity = nil
     }
 
@@ -254,7 +1027,8 @@ final class ContinuousRecorder: ObservableObject {
     ///   - message: User-provided string to record with the event.
     ///   - timestamp: Timestamp to associate with the event (defaults to now).
     func logCustomEvent(_ message: String, at timestamp: Date = Date()) {
-        // print("Custom message: \(message) \(timestamp)")
-        recorder.markCustomEvent(message, at: timestamp)
+        ingestionQueue.async { [weak self] in
+            self?.recorder.markCustomEvent(message, at: timestamp)
+        }
     }
 }
