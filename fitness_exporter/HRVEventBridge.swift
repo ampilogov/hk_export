@@ -23,6 +23,8 @@ final class HRVEventBridge: ObservableObject {
     private var pendingGraphSamples: [RRIntervalGraphModel.Sample] = []
     private var beatTimeline = RRBeatTimelineReconstructor()
     private var recentECGPointBuffer: [ECGPlotPoint] = []
+    private var ecgTimeline = SensorBagPersistence.ECGTimelineReconstructor()
+    private var graphWindowEnd: Date?
     private var latestRawHR = 0
     private var latestDerivedHR = 0
     private var latestRR: Date?
@@ -90,22 +92,24 @@ final class HRVEventBridge: ObservableObject {
                 if presentationActive {
                     pendingGraphSamples.append(contentsOf: newGraphSamples)
                 }
-                let cutoff = event.timestamp.addingTimeInterval(-graphModel.window)
-                recentGraphSampleBuffer.removeAll { $0.received < cutoff }
             }
+            advanceGraphWindow(to: event.timestamp)
 
         case .ecgSamples(let samples):
             guard !samples.samples.isEmpty else { return }
             latestECG = event.timestamp
-            let newPoints = SensorBagPersistence.ecgPoints(from: event)
+            let newPoints = SensorBagPersistence.ecgPoints(
+                from: event,
+                timeline: &ecgTimeline
+            )
             guard !newPoints.isEmpty else { return }
             recentECGPointBuffer.append(contentsOf: newPoints)
-            let cutoff = event.timestamp.addingTimeInterval(-graphModel.window)
-            recentECGPointBuffer.removeAll { $0.timestamp < cutoff }
+            advanceGraphWindow(to: event.timestamp)
 
         case .accSamples(let samples):
             guard !samples.samples.isEmpty else { return }
             latestACC = event.timestamp
+            advanceGraphWindow(to: event.timestamp)
 
         case .battery, .hrvStage, .location, .custom:
             return
@@ -114,6 +118,15 @@ final class HRVEventBridge: ObservableObject {
         if presentationActive {
             schedulePresentationUpdateIfNeeded()
         }
+    }
+
+    private func advanceGraphWindow(to timestamp: Date) {
+        let windowEnd = max(graphWindowEnd ?? timestamp, timestamp)
+        graphWindowEnd = windowEnd
+        let cutoff = windowEnd.addingTimeInterval(-graphModel.window)
+        recentGraphSampleBuffer.removeAll { $0.received < cutoff }
+        pendingGraphSamples.removeAll { $0.received < cutoff }
+        recentECGPointBuffer.removeAll { $0.timestamp < cutoff }
     }
 
     private func schedulePresentationUpdateIfNeeded() {
@@ -144,6 +157,7 @@ final class HRVEventBridge: ObservableObject {
         let lastECG = latestECG
         let lastACC = latestACC
         let recentECGPoints = recentECGPointBuffer
+        let graphWindowEnd = graphWindowEnd
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -156,13 +170,17 @@ final class HRVEventBridge: ObservableObject {
             if replace {
                 self.graphModel.replace(
                     samples: graphSamples,
-                    lastPackageTime: lastPackageTime
+                    lastPackageTime: lastPackageTime,
+                    windowEnd: graphWindowEnd
                 )
             } else if !graphSamples.isEmpty {
                 self.graphModel.append(
                     samples: graphSamples,
-                    lastPackageTime: lastPackageTime
+                    lastPackageTime: lastPackageTime,
+                    windowEnd: graphWindowEnd
                 )
+            } else if let graphWindowEnd {
+                self.graphModel.prune(relativeTo: graphWindowEnd)
             }
         }
     }

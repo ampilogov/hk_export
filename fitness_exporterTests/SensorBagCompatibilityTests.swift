@@ -125,6 +125,61 @@ final class SensorBagCompatibilityTests: XCTestCase {
         )
     }
 
+    func test_ECGTimeline_ignoresBluetoothArrivalJitterAcrossPackets() throws {
+        let receivedAt = Date(timeIntervalSince1970: 100)
+        let events = [
+            SensorEvent(
+                timestamp: receivedAt,
+                data: .ecgSamples(
+                    ECGSamples(
+                        samples: [
+                            ECGSample(timestamp: 1_000_000_000, voltage: -12),
+                            ECGSample(timestamp: 1_008_000_000, voltage: 8),
+                        ]
+                    )
+                )
+            ),
+            SensorEvent(
+                // The packet arrived 250 ms later even though its device clock
+                // advanced only 16 ms from the preceding packet's final sample.
+                timestamp: receivedAt.addingTimeInterval(0.25),
+                data: .ecgSamples(
+                    ECGSamples(
+                        samples: [
+                            ECGSample(timestamp: 1_016_000_000, voltage: 20),
+                            ECGSample(timestamp: 1_024_000_000, voltage: 34),
+                        ]
+                    )
+                )
+            ),
+        ]
+
+        let points = try SensorBagPersistence.decodeECGPoints(
+            from: SensorBag()._serializeV1(events),
+            in: receivedAt.addingTimeInterval(-1)...receivedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(points.map(\.voltage), [-12, 8, 20, 34])
+        let offsets = points.map { $0.timestamp.timeIntervalSince(receivedAt) }
+        XCTAssertEqual(offsets[0], -0.008, accuracy: 0.000_001)
+        XCTAssertEqual(offsets[1], 0, accuracy: 0.000_001)
+        XCTAssertEqual(offsets[2], 0.008, accuracy: 0.000_001)
+        XCTAssertEqual(offsets[3], 0.016, accuracy: 0.000_001)
+
+        var liveTimeline = SensorBagPersistence.ECGTimelineReconstructor()
+        let livePoints = events.flatMap {
+            SensorBagPersistence.ecgPoints(from: $0, timeline: &liveTimeline)
+        }
+        XCTAssertEqual(livePoints.map(\.voltage), points.map(\.voltage))
+        for (live, saved) in zip(livePoints, points) {
+            XCTAssertEqual(
+                live.timestamp.timeIntervalSince(saved.timestamp),
+                0,
+                accuracy: 0.000_001
+            )
+        }
+    }
+
     func test_heartRateGraphScale_convertsRRSecondsToBeatsPerMinute() {
         XCTAssertEqual(HeartRateGraphScale.beatsPerMinute(forRR: 1), 60)
         XCTAssertEqual(HeartRateGraphScale.beatsPerMinute(forRR: 0.5), 120)
@@ -158,6 +213,21 @@ final class SensorBagCompatibilityTests: XCTestCase {
             base.addingTimeInterval(2)
         ])
         XCTAssertEqual(normalized.map(\.rr), [0.9, 0.7, 1.0])
+    }
+
+    @MainActor
+    func test_heartRateGraphWindow_advancesWithoutANewRRSample() {
+        let base = Date(timeIntervalSince1970: 1_000)
+        let model = RRIntervalGraphModel()
+        model.replace(
+            samples: [RRIntervalGraphModel.Sample(rr: 1, received: base)],
+            lastPackageTime: base,
+            windowEnd: base
+        )
+
+        model.prune(relativeTo: base.addingTimeInterval(model.window + 1))
+
+        XCTAssertTrue(model.samples.isEmpty)
     }
 
     func test_signalTimeline_limitsHistoryAndECGRenderingRange() {

@@ -123,19 +123,22 @@ struct HRVView: View {
     var body: some View {
         ZStack {
             recordingBackground.ignoresSafeArea()
-            VStack(spacing: 12) {
-                if connectionPhase == .notConnected {
-                    disconnectedContent
-                } else {
-                    connectedHeader
-                    modeControls
-                    recordingStatusContent
-                    orthostaticResultContent
-                    SynchronizedSignalGraphs(eventBridge: eventBridge)
+            ScrollView {
+                VStack(spacing: 12) {
+                    if connectionPhase == .notConnected {
+                        disconnectedContent
+                    } else {
+                        connectedHeader
+                        modeControls
+                        recordingStatusContent
+                        orthostaticResultContent
+                        SynchronizedSignalGraphs(eventBridge: eventBridge)
+                    }
                 }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .padding()
-            .frame(maxHeight: .infinity, alignment: .top)
+            .scrollBounceBehavior(.basedOnSize)
         }
         .navigationTitle("HRV")
         .onAppear {

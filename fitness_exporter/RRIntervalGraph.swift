@@ -149,24 +149,42 @@ final class RRIntervalGraphModel: ObservableObject {
 
     /// Replace the visible RR window with a snapshot accumulated off the main
     /// thread while the graph was hidden or the app was inactive.
-    func replace(samples: [Sample], lastPackageTime: Date?) {
+    func replace(
+        samples: [Sample],
+        lastPackageTime: Date?,
+        windowEnd: Date? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(.main))
         self.lastPackageTime = lastPackageTime
-        self.samples = samplesInWindow(samples, relativeTo: lastPackageTime)
-        pruneStageMarkers()
+        let referenceTime = windowEnd ?? lastPackageTime
+        self.samples = samplesInWindow(samples, relativeTo: referenceTime)
+        pruneStageMarkers(relativeTo: referenceTime)
     }
 
     /// Append a coalesced group of samples with a single published mutation.
-    func append(samples: [Sample], lastPackageTime: Date?) {
+    func append(
+        samples: [Sample],
+        lastPackageTime: Date?,
+        windowEnd: Date? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(.main))
         if let lastPackageTime {
             self.lastPackageTime = lastPackageTime
         }
+        let referenceTime = windowEnd ?? self.lastPackageTime
         self.samples = samplesInWindow(
             self.samples + samples,
-            relativeTo: self.lastPackageTime
+            relativeTo: referenceTime
         )
-        pruneStageMarkers()
+        pruneStageMarkers(relativeTo: referenceTime)
+    }
+
+    /// Advance the shared graph window even when no new RR sample arrived.
+    /// This prevents a healthy ECG stream from retaining stale HR indefinitely.
+    func prune(relativeTo windowEnd: Date) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        samples = samplesInWindow(samples, relativeTo: windowEnd)
+        pruneStageMarkers(relativeTo: windowEnd)
     }
 
     func markStageChange(at date: Date) {
@@ -179,7 +197,7 @@ final class RRIntervalGraphModel: ObservableObject {
     private func pruneOld() {
         guard let last = lastPackageTime else { return }
         samples = samplesInWindow(samples, relativeTo: last)
-        pruneStageMarkers()
+        pruneStageMarkers(relativeTo: last)
     }
 
     private func samplesInWindow(_ samples: [Sample], relativeTo last: Date?) -> [Sample] {
@@ -215,9 +233,9 @@ final class RRIntervalGraphModel: ObservableObject {
         return result
     }
 
-    private func pruneStageMarkers() {
-        guard let last = lastPackageTime else { return }
-        let cutoff = last.addingTimeInterval(-window)
+    private func pruneStageMarkers(relativeTo windowEnd: Date?) {
+        guard let windowEnd else { return }
+        let cutoff = windowEnd.addingTimeInterval(-window)
         stageMarkers = stageMarkers.filter { $0 >= cutoff }
     }
 }
@@ -594,6 +612,14 @@ struct SynchronizedSignalGraphs: View {
             },
             onInspectionChanged: { timestamp in
                 if frozenSnapshot == nil {
+                    // A small drift before the long press recognizes can start
+                    // the simultaneous pan gesture. Drop that transient state
+                    // before freezing so inspection cannot leave a hidden pan.
+                    panBaseEnd = nil
+                    panOffset = 0
+                    zoomBaseDuration = nil
+                    zoomBaseCenter = nil
+                    zoomMagnification = 1
                     frozenSnapshot = SignalGraphSnapshot(
                         heartRate: liveSnapshot.heartRate,
                         ecg: liveSnapshot.ecg,
@@ -610,6 +636,8 @@ struct SynchronizedSignalGraphs: View {
             onInspectionEnded: {
                 inspectionTime = nil
                 frozenSnapshot = nil
+                panBaseEnd = nil
+                panOffset = 0
             }
         )
     }

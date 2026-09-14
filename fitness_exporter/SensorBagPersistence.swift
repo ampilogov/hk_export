@@ -4,6 +4,59 @@ import HealthKit
 
 /// Utilities for persisting sensor bags and exporting heartbeats to HealthKit.
 enum SensorBagPersistence {
+    /// Maps the Polar device's monotonic ECG clock onto wall time. A single
+    /// anchor is intentionally reused across packets so Bluetooth delivery
+    /// jitter cannot introduce artificial gaps or overlaps in the trace.
+    struct ECGTimelineReconstructor {
+        static let discontinuityTolerance: TimeInterval = 2
+
+        private var anchorDeviceTimestamp: UInt64?
+        private var anchorWallTime: Date?
+        private var lastDeviceTimestamp: UInt64?
+
+        mutating func reset() {
+            anchorDeviceTimestamp = nil
+            anchorWallTime = nil
+            lastDeviceTimestamp = nil
+        }
+
+        mutating func wallTimes(
+            receivedAt: Date,
+            deviceTimestamps: [UInt64]
+        ) -> [Date] {
+            guard let packetLastTimestamp = deviceTimestamps.last else { return [] }
+
+            let deviceClockDidNotAdvance = lastDeviceTimestamp.map {
+                packetLastTimestamp <= $0
+            } ?? false
+            let projectedPacketEnd = projectedWallTime(for: packetLastTimestamp)
+            let arrivalDrift = projectedPacketEnd.map {
+                receivedAt.timeIntervalSince($0)
+            }
+            if anchorDeviceTimestamp == nil
+                || deviceClockDidNotAdvance
+                || arrivalDrift.map({ abs($0) > Self.discontinuityTolerance }) == true
+            {
+                anchorDeviceTimestamp = packetLastTimestamp
+                anchorWallTime = receivedAt
+            }
+
+            lastDeviceTimestamp = packetLastTimestamp
+            return deviceTimestamps.compactMap { projectedWallTime(for: $0) }
+        }
+
+        private func projectedWallTime(for deviceTimestamp: UInt64) -> Date? {
+            guard let anchorDeviceTimestamp, let anchorWallTime else { return nil }
+            let offset: TimeInterval
+            if deviceTimestamp >= anchorDeviceTimestamp {
+                offset = Double(deviceTimestamp - anchorDeviceTimestamp) / 1_000_000_000
+            } else {
+                offset = -Double(anchorDeviceTimestamp - deviceTimestamp) / 1_000_000_000
+            }
+            return anchorWallTime.addingTimeInterval(offset)
+        }
+    }
+
     enum Profile: String, CaseIterable {
         case continuous
         case orthostatic
@@ -1400,6 +1453,7 @@ enum SensorBagPersistence {
         let range = center.addingTimeInterval(-halfWidth)...center.addingTimeInterval(halfWidth)
         let livePoints = ecgPoints(from: liveEvents, in: range)
         var filePoints: [ECGPlotPoint] = []
+        var fileTimeline = ECGTimelineReconstructor()
 
         let liveCoversRange =
             (livePoints.first?.timestamp ?? .distantFuture) <= range.lowerBound
@@ -1413,7 +1467,11 @@ enum SensorBagPersistence {
                 let snapshot = try readStableFile(fileURL: entry.url)
                 do {
                     filePoints.append(
-                        contentsOf: try decodeECGPoints(from: snapshot.data, in: range)
+                        contentsOf: try decodeECGPoints(
+                            from: snapshot.data,
+                            in: range,
+                            timeline: &fileTimeline
+                        )
                     )
                 } catch {
                     throw NSError(
@@ -1438,6 +1496,15 @@ enum SensorBagPersistence {
     static func decodeECGPoints(
         from data: Data,
         in range: ClosedRange<Date>
+    ) throws -> [ECGPlotPoint] {
+        var timeline = ECGTimelineReconstructor()
+        return try decodeECGPoints(from: data, in: range, timeline: &timeline)
+    }
+
+    private static func decodeECGPoints(
+        from data: Data,
+        in range: ClosedRange<Date>,
+        timeline: inout ECGTimelineReconstructor
     ) throws -> [ECGPlotPoint] {
         var reader = BinaryReader(data: data)
         let version = try reader.readUInt32()
@@ -1470,40 +1537,39 @@ enum SensorBagPersistence {
                         let rawVoltage = try reader.readInt32()
                         packet.append((timestamp, clampedInt16(rawVoltage)))
                     }
-                    guard let lastTimestamp = packet.last?.0 else { continue }
-                    for (timestamp, voltage) in packet {
-                        let wallTime = wallTime(
+                    points.append(
+                        contentsOf: mappedECGPoints(
+                            deviceTimestamps: packet.map(\.0),
+                            voltages: packet.map(\.1),
                             receivedAt: receivedAt,
-                            deviceTimestamp: timestamp,
-                            lastDeviceTimestamp: lastTimestamp
+                            timeline: &timeline
                         )
-                        if range.contains(wallTime) {
-                            points.append(
-                                ECGPlotPoint(timestamp: wallTime, voltage: voltage)
-                            )
-                        }
-                    }
+                        .filter { range.contains($0.timestamp) }
+                    )
                 } else {
                     let firstTimestamp = try reader.readUInt64()
                     let lastTimestamp = try reader.readUInt64()
                     guard lastTimestamp >= firstTimestamp else {
                         throw SensorBagDecodeError.invalidECGTimestampRange
                     }
-                    let packetDuration = Double(lastTimestamp - firstTimestamp) / 1_000_000_000
-                    for sampleIndex in 0..<sampleCount {
-                        let voltage = try reader.readInt16()
-                        let fraction = sampleCount > 1
-                            ? Double(sampleIndex) / Double(sampleCount - 1)
-                            : 1
-                        let wallTime = receivedAt.addingTimeInterval(
-                            -packetDuration * (1 - fraction)
-                        )
-                        if range.contains(wallTime) {
-                            points.append(
-                                ECGPlotPoint(timestamp: wallTime, voltage: voltage)
-                            )
-                        }
+                    var voltages: [Int16] = []
+                    voltages.reserveCapacity(sampleCount)
+                    for _ in 0..<sampleCount {
+                        voltages.append(try reader.readInt16())
                     }
+                    points.append(
+                        contentsOf: mappedECGPoints(
+                            deviceTimestamps: interpolatedTimestamps(
+                                first: firstTimestamp,
+                                last: lastTimestamp,
+                                count: sampleCount
+                            ),
+                            voltages: voltages,
+                            receivedAt: receivedAt,
+                            timeline: &timeline
+                        )
+                        .filter { range.contains($0.timestamp) }
+                    )
                 }
             case 3:
                 let sampleCount = Int(try reader.readUInt32())
@@ -1542,8 +1608,10 @@ enum SensorBagPersistence {
         from events: [SensorEvent],
         in range: ClosedRange<Date>
     ) -> [ECGPlotPoint] {
-        events
-            .flatMap { ecgPoints(from: $0) }
+        var timeline = ECGTimelineReconstructor()
+        return events
+            .sorted { $0.timestamp < $1.timestamp }
+            .flatMap { ecgPoints(from: $0, timeline: &timeline) }
             .filter { range.contains($0.timestamp) }
             .sorted { $0.timestamp < $1.timestamp }
     }
@@ -1552,34 +1620,52 @@ enum SensorBagPersistence {
     /// layer uses the same conversion as persisted recordings so a live trace
     /// joins its saved counterpart without a timestamp discontinuity.
     static func ecgPoints(from event: SensorEvent) -> [ECGPlotPoint] {
+        var timeline = ECGTimelineReconstructor()
+        return ecgPoints(from: event, timeline: &timeline)
+    }
+
+    static func ecgPoints(
+        from event: SensorEvent,
+        timeline: inout ECGTimelineReconstructor
+    ) -> [ECGPlotPoint] {
         guard case .ecgSamples(let packet) = event.data,
-              let lastTimestamp = packet.samples.last?.timestamp
+              !packet.samples.isEmpty
         else { return [] }
-        return packet.samples.map { sample in
-            ECGPlotPoint(
-                timestamp: wallTime(
-                    receivedAt: event.timestamp,
-                    deviceTimestamp: sample.timestamp,
-                    lastDeviceTimestamp: lastTimestamp
-                ),
-                voltage: sample.voltage
-            )
+        return mappedECGPoints(
+            deviceTimestamps: packet.samples.map(\.timestamp),
+            voltages: packet.samples.map(\.voltage),
+            receivedAt: event.timestamp,
+            timeline: &timeline
+        )
+    }
+
+    private static func mappedECGPoints(
+        deviceTimestamps: [UInt64],
+        voltages: [Int16],
+        receivedAt: Date,
+        timeline: inout ECGTimelineReconstructor
+    ) -> [ECGPlotPoint] {
+        let wallTimes = timeline.wallTimes(
+            receivedAt: receivedAt,
+            deviceTimestamps: deviceTimestamps
+        )
+        return zip(wallTimes, voltages).map { timestamp, voltage in
+            ECGPlotPoint(timestamp: timestamp, voltage: voltage)
         }
     }
 
-    private static func wallTime(
-        receivedAt: Date,
-        deviceTimestamp: UInt64,
-        lastDeviceTimestamp: UInt64
-    ) -> Date {
-        if deviceTimestamp <= lastDeviceTimestamp {
-            return receivedAt.addingTimeInterval(
-                -Double(lastDeviceTimestamp - deviceTimestamp) / 1_000_000_000
-            )
+    private static func interpolatedTimestamps(
+        first: UInt64,
+        last: UInt64,
+        count: Int
+    ) -> [UInt64] {
+        guard count > 0 else { return [] }
+        guard count > 1 else { return [last] }
+        let span = Double(last - first)
+        return (0..<count).map { index in
+            let fraction = Double(index) / Double(count - 1)
+            return first + UInt64((span * fraction).rounded())
         }
-        return receivedAt.addingTimeInterval(
-            Double(deviceTimestamp - lastDeviceTimestamp) / 1_000_000_000
-        )
     }
 
     private static func clampedInt16(_ value: Int32) -> Int16 {
