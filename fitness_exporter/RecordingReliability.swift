@@ -4,7 +4,7 @@ import UserNotifications
 
 enum RecordingNotificationPolicy {
     static var attentionInterruptionLevel: UNNotificationInterruptionLevel {
-        .active
+        .timeSensitive
     }
 
     static var usesTimeSensitiveAlerts: Bool {
