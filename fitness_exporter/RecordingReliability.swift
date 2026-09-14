@@ -4,7 +4,11 @@ import UserNotifications
 
 enum RecordingNotificationPolicy {
     static var attentionInterruptionLevel: UNNotificationInterruptionLevel {
-        .timeSensitive
+        #if ARTEM_BUILD
+            return .active
+        #else
+            return .timeSensitive
+        #endif
     }
 
     static var usesTimeSensitiveAlerts: Bool {
