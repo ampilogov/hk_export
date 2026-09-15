@@ -38,25 +38,13 @@ enum HeartRateGraphScale {
         return ticks
     }
 
-    /// Keep a single implausible point from flattening the useful signal.
-    /// Outliers remain visible, clamped to the edge of the plot.
+    /// Include every sample in the axis domain so its plotted Y coordinate
+    /// always represents its actual BPM value.
     static func displayRange(for values: [Double]) -> ClosedRange<Double> {
-        let finite = values.filter(\.isFinite).sorted()
-        guard let absoluteMinimum = finite.first,
-              let absoluteMaximum = finite.last
+        let finite = values.filter(\.isFinite)
+        guard let minimum = finite.min(),
+              let maximum = finite.max()
         else { return 0...1 }
-
-        let minimum: Double
-        let maximum: Double
-        if finite.count >= 20 {
-            let lowerIndex = Int(floor(Double(finite.count - 1) * 0.05))
-            let upperIndex = Int(floor(Double(finite.count - 1) * 0.95))
-            minimum = finite[lowerIndex]
-            maximum = finite[max(lowerIndex, upperIndex)]
-        } else {
-            minimum = absoluteMinimum
-            maximum = absoluteMaximum
-        }
 
         let span = maximum - minimum
         let padding = max(span * 0.08, minimum == maximum ? 1 : 0.5)
@@ -76,6 +64,18 @@ enum SignalTimelineScale {
 
     static func shouldRenderECG(visibleDuration: TimeInterval) -> Bool {
         visibleDuration <= maximumECGVisibleDuration + 0.001
+    }
+
+    /// Reaching the newest edge resumes live-following without changing zoom.
+    /// The small tolerance avoids leaving the graph paused a fraction of a
+    /// second behind the stream because a drag ended a pixel short.
+    static func shouldFollowLatest(
+        proposedEnd: Date,
+        latest: Date,
+        visibleDuration: TimeInterval
+    ) -> Bool {
+        let edgeTolerance = max(0.25, min(visibleDuration * 0.02, 1))
+        return proposedEnd.timeIntervalSince(latest) >= -edgeTolerance
     }
 
     static func timeTicks(in range: ClosedRange<Date>) -> [Date] {
@@ -321,6 +321,7 @@ private struct SignalGraphSnapshot {
     let ecg: [ECGPlotPoint]
     let stageMarkers: [Date]
     let lastPackageTime: Date?
+    let latestSignalTime: Date
     let range: ClosedRange<Date>
 }
 
@@ -413,6 +414,7 @@ struct SynchronizedSignalGraphs: View {
             ecg: liveECG,
             stageMarkers: model.stageMarkers,
             lastPackageTime: model.lastPackageTime,
+            latestSignalTime: latest,
             range: liveRange
         )
         let snapshot = frozenSnapshot ?? liveSnapshot
@@ -583,7 +585,19 @@ struct SynchronizedSignalGraphs: View {
             onPanEnded: { offset in
                 guard frozenSnapshot == nil else { return }
                 let base = panBaseEnd ?? displayedRange.upperBound
-                pausedEnd = base.addingTimeInterval(-offset)
+                let proposedEnd = base.addingTimeInterval(-offset)
+                if SignalTimelineScale.shouldFollowLatest(
+                    proposedEnd: proposedEnd,
+                    latest: liveSnapshot.latestSignalTime,
+                    visibleDuration: currentVisibleDuration
+                ) {
+                    pausedEnd = nil
+                } else {
+                    // Never persist an endpoint in the future. A viewport at
+                    // the newest edge is represented by `nil` and follows the
+                    // incoming stream; any earlier endpoint remains paused.
+                    pausedEnd = min(proposedEnd, liveSnapshot.latestSignalTime)
+                }
                 panBaseEnd = nil
                 panOffset = 0
             },
@@ -625,6 +639,7 @@ struct SynchronizedSignalGraphs: View {
                         ecg: liveSnapshot.ecg,
                         stageMarkers: liveSnapshot.stageMarkers,
                         lastPackageTime: liveSnapshot.lastPackageTime,
+                        latestSignalTime: liveSnapshot.latestSignalTime,
                         range: displayedRange
                     )
                 }
@@ -734,7 +749,10 @@ private struct HeartRatePlot: View {
                 1
             )
             let displayRange = HeartRateGraphScale.displayRange(
-                for: visiblePoints.map(\.bpm)
+                // Keep the vertical scale stable while zooming and panning.
+                // Recomputing it from only the visible samples made unchanged
+                // BPM points appear to jump to different Y values.
+                for: points.map(\.bpm)
             )
             let ySpan = max(displayRange.upperBound - displayRange.lowerBound, 0.001)
             let yTicks = HeartRateGraphScale.axisTicks(
