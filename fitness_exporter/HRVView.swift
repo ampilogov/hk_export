@@ -626,6 +626,8 @@ struct HRVView: View {
                     Text(summary)
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Spacer()
                     Label("Details", systemImage: "chevron.right")
                         .font(.caption)
@@ -672,9 +674,11 @@ struct HRVView: View {
         else { return nil }
         let index = laying.rmssd > 0 ? standing.rmssd / laying.rmssd : 0
         return String(
-            format: "Laying %.0f ms · Standing %.0f ms · Index %.2f",
+            format: "L %.0fms/%.0fbpm · S %.0fms/%.0fbpm · %.2f×",
             laying.rmssd,
+            laying.meanHR,
             standing.rmssd,
+            standing.meanHR,
             index
         )
     }
