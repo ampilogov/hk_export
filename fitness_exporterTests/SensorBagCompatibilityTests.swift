@@ -192,8 +192,9 @@ final class SensorBagCompatibilityTests: XCTestCase {
 
         let normalValues = Array(repeating: 70.0, count: 20) + [240]
         let displayRange = HeartRateGraphScale.displayRange(for: normalValues)
-        XCTAssertLessThan(displayRange.upperBound, 240)
         XCTAssertTrue(displayRange.contains(70))
+        XCTAssertTrue(displayRange.contains(240))
+        XCTAssertGreaterThan(displayRange.upperBound, 240)
     }
 
     func test_heartRateGraphSamples_sortAndUseNewestDuplicateTimestamp() {
@@ -243,6 +244,39 @@ final class SensorBagCompatibilityTests: XCTestCase {
             in: start...start.addingTimeInterval(30)
         )
         XCTAssertTrue((3...5).contains(ticks.count))
+    }
+
+    func test_signalTimeline_resumesLiveFollowAtNewestEdge() {
+        let latest = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(
+            SignalTimelineScale.shouldFollowLatest(
+                proposedEnd: latest,
+                latest: latest,
+                visibleDuration: 30
+            )
+        )
+        XCTAssertTrue(
+            SignalTimelineScale.shouldFollowLatest(
+                proposedEnd: latest.addingTimeInterval(10),
+                latest: latest,
+                visibleDuration: 30
+            )
+        )
+        XCTAssertTrue(
+            SignalTimelineScale.shouldFollowLatest(
+                proposedEnd: latest.addingTimeInterval(-0.5),
+                latest: latest,
+                visibleDuration: 30
+            )
+        )
+        XCTAssertFalse(
+            SignalTimelineScale.shouldFollowLatest(
+                proposedEnd: latest.addingTimeInterval(-1),
+                latest: latest,
+                visibleDuration: 30
+            )
+        )
     }
 
     func test_rrBeatTimeline_usesRRSpacingInsteadOfBluetoothArrivalJitter() {
