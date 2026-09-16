@@ -84,9 +84,8 @@ enum SignalTimelineScale {
         visibleDuration <= maximumECGVisibleDuration + 0.001
     }
 
-    /// Reaching the newest edge resumes live-following without changing zoom.
-    /// The small tolerance avoids leaving the graph paused a fraction of a
-    /// second behind the stream because a drag ended a pixel short.
+    /// Treat a range endpoint very near the newest sample as being at the live
+    /// edge when a pan begins from live mode.
     static func shouldFollowLatest(
         proposedEnd: Date,
         latest: Date,
@@ -382,6 +381,7 @@ struct SynchronizedSignalGraphs: View {
     @State private var pausedEnd: Date?
     @State private var panBaseEnd: Date?
     @State private var panOffset: TimeInterval = 0
+    @State private var panStartedFromHistory = false
     @State private var zoomBaseDuration: TimeInterval?
     @State private var zoomBaseCenter: Date?
     @State private var zoomWasFollowingLatest = false
@@ -638,11 +638,12 @@ struct SynchronizedSignalGraphs: View {
             range: displayedRange,
             onPanChanged: { offset in
                 guard frozenSnapshot == nil else { return }
-                if retainedHistory == nil {
-                    retainedHistory = navigationSnapshot
-                }
                 if panBaseEnd == nil {
                     panBaseEnd = displayedRange.upperBound
+                    panStartedFromHistory = pausedEnd != nil || retainedHistory != nil
+                }
+                if retainedHistory == nil, (panStartedFromHistory || offset > 0) {
+                    retainedHistory = navigationSnapshot
                 }
                 panOffset = offset
             },
@@ -650,16 +651,23 @@ struct SynchronizedSignalGraphs: View {
                 guard frozenSnapshot == nil else { return }
                 let base = panBaseEnd ?? displayedRange.upperBound
                 let proposedEnd = base.addingTimeInterval(-offset)
-                pausedEnd = SignalTimelineScale.resolvedPausedEnd(
-                    proposedEnd: proposedEnd,
-                    latest: navigationSnapshot.latestSignalTime,
-                    visibleDuration: visibleDuration
-                )
-                if pausedEnd == nil {
-                    retainedHistory = nil
+                if panStartedFromHistory {
+                    pausedEnd = min(proposedEnd, navigationSnapshot.latestSignalTime)
+                } else {
+                    pausedEnd = SignalTimelineScale.resolvedPausedEnd(
+                        proposedEnd: proposedEnd,
+                        latest: navigationSnapshot.latestSignalTime,
+                        visibleDuration: visibleDuration
+                    )
+                    if pausedEnd != nil, retainedHistory == nil {
+                        retainedHistory = navigationSnapshot
+                    } else if pausedEnd == nil {
+                        retainedHistory = nil
+                    }
                 }
                 panBaseEnd = nil
                 panOffset = 0
+                panStartedFromHistory = false
             },
             onZoomChanged: { _ in
                 guard frozenSnapshot == nil else { return }
@@ -691,11 +699,9 @@ struct SynchronizedSignalGraphs: View {
                     proposedEnd = displayedRange.upperBound
                 }
                 visibleDuration = duration
-                let resolvedPausedEnd = SignalTimelineScale.resolvedPausedEnd(
-                    proposedEnd: proposedEnd,
-                    latest: navigationSnapshot.latestSignalTime,
-                    visibleDuration: duration
-                )
+                let resolvedPausedEnd = zoomWasFollowingLatest
+                    ? nil
+                    : min(proposedEnd, navigationSnapshot.latestSignalTime)
                 pausedEnd = resolvedPausedEnd
                 if resolvedPausedEnd == nil {
                     retainedHistory = nil
@@ -714,6 +720,7 @@ struct SynchronizedSignalGraphs: View {
                     // before freezing so inspection cannot leave a hidden pan.
                     panBaseEnd = nil
                     panOffset = 0
+                    panStartedFromHistory = false
                     zoomBaseDuration = nil
                     zoomBaseCenter = nil
                     zoomWasFollowingLatest = false
@@ -739,6 +746,7 @@ struct SynchronizedSignalGraphs: View {
                 frozenSnapshot = nil
                 panBaseEnd = nil
                 panOffset = 0
+                panStartedFromHistory = false
                 if pausedEnd == nil {
                     retainedHistory = nil
                 }
@@ -751,6 +759,7 @@ struct SynchronizedSignalGraphs: View {
         pausedEnd = nil
         panBaseEnd = nil
         panOffset = 0
+        panStartedFromHistory = false
         zoomBaseDuration = nil
         zoomBaseCenter = nil
         zoomWasFollowingLatest = false
