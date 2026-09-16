@@ -73,6 +73,13 @@ enum SignalTimelineScale {
         min(max(duration, minimumVisibleDuration), historyDuration)
     }
 
+    static func zoomedDuration(
+        baseDuration: TimeInterval,
+        magnification: Double
+    ) -> TimeInterval {
+        clampedDuration(baseDuration / max(magnification, 0.01))
+    }
+
     static func shouldRenderECG(visibleDuration: TimeInterval) -> Bool {
         visibleDuration <= maximumECGVisibleDuration + 0.001
     }
@@ -377,8 +384,8 @@ struct SynchronizedSignalGraphs: View {
     @State private var panOffset: TimeInterval = 0
     @State private var zoomBaseDuration: TimeInterval?
     @State private var zoomBaseCenter: Date?
-    @State private var zoomMagnification: CGFloat = 1
     @State private var zoomWasFollowingLatest = false
+    @State private var retainedHistory: SignalGraphSnapshot?
     @State private var frozenSnapshot: SignalGraphSnapshot?
     @State private var inspectionTime: Date?
     @State private var showExpanded = false
@@ -388,7 +395,8 @@ struct SynchronizedSignalGraphs: View {
             eventBridge: eventBridge,
             isExpanded: false,
             initialVisibleDuration: SignalTimelineScale.initialVisibleDuration,
-            initialPausedEnd: nil
+            initialPausedEnd: nil,
+            initialRetainedHistory: nil
         )
     }
 
@@ -396,7 +404,8 @@ struct SynchronizedSignalGraphs: View {
         eventBridge: HRVEventBridge,
         isExpanded: Bool,
         initialVisibleDuration: TimeInterval,
-        initialPausedEnd: Date?
+        initialPausedEnd: Date?,
+        initialRetainedHistory: SignalGraphSnapshot?
     ) {
         self.eventBridge = eventBridge
         self.model = eventBridge.graphModel
@@ -405,6 +414,7 @@ struct SynchronizedSignalGraphs: View {
             initialValue: SignalTimelineScale.clampedDuration(initialVisibleDuration)
         )
         self._pausedEnd = State(initialValue: initialPausedEnd)
+        self._retainedHistory = State(initialValue: initialRetainedHistory)
     }
 
     var body: some View {
@@ -418,13 +428,20 @@ struct SynchronizedSignalGraphs: View {
             }
         }
         let liveECG = eventBridge.recentECGPoints
-        let latest = [liveHeartRate.last?.timestamp, liveECG.last?.timestamp]
+        let liveLatest = [liveHeartRate.last?.timestamp, liveECG.last?.timestamp]
             .compactMap { $0 }
             .max() ?? Date()
-        let earliest = [liveHeartRate.first?.timestamp, liveECG.first?.timestamp]
+        let heartRate = retainedHistory?.heartRate ?? liveHeartRate
+        let ecg = retainedHistory?.ecg ?? liveECG
+        let stageMarkers = retainedHistory?.stageMarkers ?? model.stageMarkers
+        let lastPackageTime = retainedHistory == nil
+            ? model.lastPackageTime
+            : retainedHistory?.lastPackageTime
+        let latest = retainedHistory?.latestSignalTime ?? liveLatest
+        let earliest = [heartRate.first?.timestamp, ecg.first?.timestamp]
             .compactMap { $0 }
             .min() ?? latest.addingTimeInterval(-SignalTimelineScale.historyDuration)
-        let duration = currentVisibleDuration
+        let duration = visibleDuration
         let proposedEnd: Date = {
             if zoomBaseDuration != nil, zoomWasFollowingLatest {
                 return latest
@@ -441,21 +458,27 @@ struct SynchronizedSignalGraphs: View {
             earliest: earliest,
             latest: latest
         )
-        let liveSnapshot = SignalGraphSnapshot(
-            heartRate: liveHeartRate,
-            ecg: liveECG,
-            stageMarkers: model.stageMarkers,
-            lastPackageTime: model.lastPackageTime,
+        let navigationSnapshot = SignalGraphSnapshot(
+            heartRate: heartRate,
+            ecg: ecg,
+            stageMarkers: stageMarkers,
+            lastPackageTime: lastPackageTime,
             latestSignalTime: latest,
             range: liveRange
         )
-        let snapshot = frozenSnapshot ?? liveSnapshot
+        let snapshot = frozenSnapshot ?? navigationSnapshot
 
         Group {
             if isExpanded {
-                expandedContent(liveSnapshot: liveSnapshot, snapshot: snapshot)
+                expandedContent(
+                    navigationSnapshot: navigationSnapshot,
+                    snapshot: snapshot
+                )
             } else {
-                compactContent(liveSnapshot: liveSnapshot, snapshot: snapshot)
+                compactContent(
+                    navigationSnapshot: navigationSnapshot,
+                    snapshot: snapshot
+                )
             }
         }
         .fullScreenCover(isPresented: $showExpanded, onDismiss: {
@@ -465,10 +488,11 @@ struct SynchronizedSignalGraphs: View {
                 eventBridge: eventBridge,
                 isExpanded: true,
                 initialVisibleDuration: min(
-                    currentVisibleDuration,
+                    visibleDuration,
                     SignalTimelineScale.maximumECGVisibleDuration
                 ),
-                initialPausedEnd: pausedEnd
+                initialPausedEnd: pausedEnd,
+                initialRetainedHistory: retainedHistory
             )
             .onAppear {
                 SignalGraphOrientation.enterFullScreen()
@@ -477,7 +501,7 @@ struct SynchronizedSignalGraphs: View {
     }
 
     private func compactContent(
-        liveSnapshot: SignalGraphSnapshot,
+        navigationSnapshot: SignalGraphSnapshot,
         snapshot: SignalGraphSnapshot
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -502,7 +526,10 @@ struct SynchronizedSignalGraphs: View {
             )
             .frame(height: 170)
             .overlay {
-                interactionLayer(liveSnapshot: liveSnapshot, displayedRange: snapshot.range)
+                interactionLayer(
+                    navigationSnapshot: navigationSnapshot,
+                    displayedRange: snapshot.range
+                )
             }
 
             HStack {
@@ -524,13 +551,16 @@ struct SynchronizedSignalGraphs: View {
             )
             .frame(height: 150)
             .overlay {
-                interactionLayer(liveSnapshot: liveSnapshot, displayedRange: snapshot.range)
+                interactionLayer(
+                    navigationSnapshot: navigationSnapshot,
+                    displayedRange: snapshot.range
+                )
             }
         }
     }
 
     private func expandedContent(
-        liveSnapshot: SignalGraphSnapshot,
+        navigationSnapshot: SignalGraphSnapshot,
         snapshot: SignalGraphSnapshot
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -559,7 +589,10 @@ struct SynchronizedSignalGraphs: View {
             .frame(maxHeight: .infinity)
             .layoutPriority(1)
             .overlay {
-                interactionLayer(liveSnapshot: liveSnapshot, displayedRange: snapshot.range)
+                interactionLayer(
+                    navigationSnapshot: navigationSnapshot,
+                    displayedRange: snapshot.range
+                )
             }
 
             Text("Heart Rate")
@@ -574,19 +607,15 @@ struct SynchronizedSignalGraphs: View {
             )
             .frame(height: 90)
             .overlay {
-                interactionLayer(liveSnapshot: liveSnapshot, displayedRange: snapshot.range)
+                interactionLayer(
+                    navigationSnapshot: navigationSnapshot,
+                    displayedRange: snapshot.range
+                )
             }
         }
         .padding(10)
         .background(Color(UIColor.systemBackground).ignoresSafeArea())
         .statusBarHidden()
-    }
-
-    private var currentVisibleDuration: TimeInterval {
-        guard let zoomBaseDuration else { return visibleDuration }
-        return SignalTimelineScale.clampedDuration(
-            zoomBaseDuration / Double(max(zoomMagnification, 0.01))
-        )
     }
 
     private func visibleRange(
@@ -602,13 +631,16 @@ struct SynchronizedSignalGraphs: View {
     }
 
     private func interactionLayer(
-        liveSnapshot: SignalGraphSnapshot,
+        navigationSnapshot: SignalGraphSnapshot,
         displayedRange: ClosedRange<Date>
     ) -> some View {
         SignalGraphInteractionLayer(
             range: displayedRange,
             onPanChanged: { offset in
                 guard frozenSnapshot == nil else { return }
+                if retainedHistory == nil {
+                    retainedHistory = navigationSnapshot
+                }
                 if panBaseEnd == nil {
                     panBaseEnd = displayedRange.upperBound
                 }
@@ -620,13 +652,16 @@ struct SynchronizedSignalGraphs: View {
                 let proposedEnd = base.addingTimeInterval(-offset)
                 pausedEnd = SignalTimelineScale.resolvedPausedEnd(
                     proposedEnd: proposedEnd,
-                    latest: liveSnapshot.latestSignalTime,
-                    visibleDuration: currentVisibleDuration
+                    latest: navigationSnapshot.latestSignalTime,
+                    visibleDuration: visibleDuration
                 )
+                if pausedEnd == nil {
+                    retainedHistory = nil
+                }
                 panBaseEnd = nil
                 panOffset = 0
             },
-            onZoomChanged: { magnification in
+            onZoomChanged: { _ in
                 guard frozenSnapshot == nil else { return }
                 if zoomBaseDuration == nil {
                     zoomWasFollowingLatest = pausedEnd == nil
@@ -634,32 +669,43 @@ struct SynchronizedSignalGraphs: View {
                     zoomBaseCenter = displayedRange.lowerBound.addingTimeInterval(
                         displayedRange.upperBound.timeIntervalSince(displayedRange.lowerBound) / 2
                     )
+                    if pausedEnd != nil, retainedHistory == nil {
+                        retainedHistory = navigationSnapshot
+                    }
+                    // Keep both charts completely still until the pinch ends.
+                    frozenSnapshot = navigationSnapshot
                 }
-                zoomMagnification = magnification
             },
             onZoomEnded: { magnification in
                 guard let baseDuration = zoomBaseDuration else { return }
-                let duration = SignalTimelineScale.clampedDuration(
-                    baseDuration / Double(max(magnification, 0.01))
+                let duration = SignalTimelineScale.zoomedDuration(
+                    baseDuration: baseDuration,
+                    magnification: Double(magnification)
                 )
                 let proposedEnd: Date
                 if zoomWasFollowingLatest {
-                    proposedEnd = liveSnapshot.latestSignalTime
+                    proposedEnd = navigationSnapshot.latestSignalTime
                 } else if let baseCenter = zoomBaseCenter {
                     proposedEnd = baseCenter.addingTimeInterval(duration / 2)
                 } else {
                     proposedEnd = displayedRange.upperBound
                 }
                 visibleDuration = duration
-                pausedEnd = SignalTimelineScale.resolvedPausedEnd(
+                let resolvedPausedEnd = SignalTimelineScale.resolvedPausedEnd(
                     proposedEnd: proposedEnd,
-                    latest: liveSnapshot.latestSignalTime,
+                    latest: navigationSnapshot.latestSignalTime,
                     visibleDuration: duration
                 )
+                pausedEnd = resolvedPausedEnd
+                if resolvedPausedEnd == nil {
+                    retainedHistory = nil
+                } else if retainedHistory == nil {
+                    retainedHistory = frozenSnapshot ?? navigationSnapshot
+                }
                 zoomBaseDuration = nil
                 zoomBaseCenter = nil
-                zoomMagnification = 1
                 zoomWasFollowingLatest = false
+                frozenSnapshot = nil
             },
             onInspectionChanged: { timestamp in
                 if frozenSnapshot == nil {
@@ -670,14 +716,16 @@ struct SynchronizedSignalGraphs: View {
                     panOffset = 0
                     zoomBaseDuration = nil
                     zoomBaseCenter = nil
-                    zoomMagnification = 1
                     zoomWasFollowingLatest = false
+                    if pausedEnd == nil {
+                        retainedHistory = nil
+                    }
                     frozenSnapshot = SignalGraphSnapshot(
-                        heartRate: liveSnapshot.heartRate,
-                        ecg: liveSnapshot.ecg,
-                        stageMarkers: liveSnapshot.stageMarkers,
-                        lastPackageTime: liveSnapshot.lastPackageTime,
-                        latestSignalTime: liveSnapshot.latestSignalTime,
+                        heartRate: navigationSnapshot.heartRate,
+                        ecg: navigationSnapshot.ecg,
+                        stageMarkers: navigationSnapshot.stageMarkers,
+                        lastPackageTime: navigationSnapshot.lastPackageTime,
+                        latestSignalTime: navigationSnapshot.latestSignalTime,
                         range: displayedRange
                     )
                 }
@@ -691,6 +739,9 @@ struct SynchronizedSignalGraphs: View {
                 frozenSnapshot = nil
                 panBaseEnd = nil
                 panOffset = 0
+                if pausedEnd == nil {
+                    retainedHistory = nil
+                }
             }
         )
     }
@@ -702,8 +753,9 @@ struct SynchronizedSignalGraphs: View {
         panOffset = 0
         zoomBaseDuration = nil
         zoomBaseCenter = nil
-        zoomMagnification = 1
         zoomWasFollowingLatest = false
+        retainedHistory = nil
+        frozenSnapshot = nil
     }
 }
 

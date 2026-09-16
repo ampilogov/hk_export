@@ -262,6 +262,20 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(SignalTimelineScale.clampedDuration(1), 2)
         XCTAssertEqual(SignalTimelineScale.clampedDuration(30), 30)
         XCTAssertEqual(SignalTimelineScale.clampedDuration(600), 300)
+        XCTAssertEqual(
+            SignalTimelineScale.zoomedDuration(
+                baseDuration: 30,
+                magnification: 2
+            ),
+            15
+        )
+        XCTAssertEqual(
+            SignalTimelineScale.zoomedDuration(
+                baseDuration: 30,
+                magnification: 0.5
+            ),
+            60
+        )
         XCTAssertTrue(SignalTimelineScale.shouldRenderECG(visibleDuration: 30))
         XCTAssertTrue(SignalTimelineScale.shouldRenderECG(visibleDuration: 60))
         XCTAssertFalse(SignalTimelineScale.shouldRenderECG(visibleDuration: 61))
