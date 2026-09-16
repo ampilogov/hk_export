@@ -197,6 +197,33 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertGreaterThan(displayRange.upperBound, 240)
     }
 
+    func test_heartRateGraphScale_visibleWindowDropsOffscreenOutlier() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let samples = [
+            (timestamp: start.addingTimeInterval(1), bpm: 68.0),
+            (timestamp: start.addingTimeInterval(2), bpm: 70.0),
+            (timestamp: start.addingTimeInterval(3), bpm: 72.0),
+            (timestamp: start.addingTimeInterval(20), bpm: 140.0)
+        ]
+        let visibleRange = HeartRateGraphScale.displayRange(
+            for: samples,
+            in: start...start.addingTimeInterval(10)
+        )
+        let rangeIncludingOutlier = HeartRateGraphScale.displayRange(
+            for: samples,
+            in: start...start.addingTimeInterval(30)
+        )
+
+        XCTAssertTrue(visibleRange.contains(68))
+        XCTAssertTrue(visibleRange.contains(72))
+        XCTAssertFalse(visibleRange.contains(140))
+        XCTAssertTrue(rangeIncludingOutlier.contains(140))
+        XCTAssertLessThan(
+            visibleRange.upperBound - visibleRange.lowerBound,
+            rangeIncludingOutlier.upperBound - rangeIncludingOutlier.lowerBound
+        )
+    }
+
     func test_heartRateGraphSamples_sortAndUseNewestDuplicateTimestamp() {
         let base = Date(timeIntervalSince1970: 1_000)
         let samples = [
@@ -276,6 +303,21 @@ final class SensorBagCompatibilityTests: XCTestCase {
                 latest: latest,
                 visibleDuration: 30
             )
+        )
+        XCTAssertNil(
+            SignalTimelineScale.resolvedPausedEnd(
+                proposedEnd: latest.addingTimeInterval(10),
+                latest: latest,
+                visibleDuration: 30
+            )
+        )
+        XCTAssertEqual(
+            SignalTimelineScale.resolvedPausedEnd(
+                proposedEnd: latest.addingTimeInterval(-1),
+                latest: latest,
+                visibleDuration: 30
+            ),
+            latest.addingTimeInterval(-1)
         )
     }
 

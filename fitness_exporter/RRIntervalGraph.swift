@@ -50,6 +50,17 @@ enum HeartRateGraphScale {
         let padding = max(span * 0.08, minimum == maximum ? 1 : 0.5)
         return max(0, minimum - padding)...(maximum + padding)
     }
+
+    static func displayRange(
+        for samples: [(timestamp: Date, bpm: Double)],
+        in visibleRange: ClosedRange<Date>
+    ) -> ClosedRange<Double> {
+        displayRange(
+            for: samples.compactMap { sample in
+                visibleRange.contains(sample.timestamp) ? sample.bpm : nil
+            }
+        )
+    }
 }
 
 enum SignalTimelineScale {
@@ -76,6 +87,19 @@ enum SignalTimelineScale {
     ) -> Bool {
         let edgeTolerance = max(0.25, min(visibleDuration * 0.02, 1))
         return proposedEnd.timeIntervalSince(latest) >= -edgeTolerance
+    }
+
+    static func resolvedPausedEnd(
+        proposedEnd: Date,
+        latest: Date,
+        visibleDuration: TimeInterval
+    ) -> Date? {
+        guard !shouldFollowLatest(
+            proposedEnd: proposedEnd,
+            latest: latest,
+            visibleDuration: visibleDuration
+        ) else { return nil }
+        return min(proposedEnd, latest)
     }
 
     static func timeTicks(in range: ClosedRange<Date>) -> [Date] {
@@ -354,6 +378,7 @@ struct SynchronizedSignalGraphs: View {
     @State private var zoomBaseDuration: TimeInterval?
     @State private var zoomBaseCenter: Date?
     @State private var zoomMagnification: CGFloat = 1
+    @State private var zoomWasFollowingLatest = false
     @State private var frozenSnapshot: SignalGraphSnapshot?
     @State private var inspectionTime: Date?
     @State private var showExpanded = false
@@ -400,9 +425,16 @@ struct SynchronizedSignalGraphs: View {
             .compactMap { $0 }
             .min() ?? latest.addingTimeInterval(-SignalTimelineScale.historyDuration)
         let duration = currentVisibleDuration
-        let proposedEnd = zoomBaseCenter.map {
-            $0.addingTimeInterval(duration / 2)
-        } ?? (panBaseEnd ?? pausedEnd ?? latest).addingTimeInterval(-panOffset)
+        let proposedEnd: Date = {
+            if zoomBaseDuration != nil, zoomWasFollowingLatest {
+                return latest
+            } else if let zoomBaseCenter {
+                return zoomBaseCenter.addingTimeInterval(duration / 2)
+            } else {
+                return (panBaseEnd ?? pausedEnd ?? latest)
+                    .addingTimeInterval(-panOffset)
+            }
+        }()
         let liveRange = visibleRange(
             endingAt: proposedEnd,
             duration: duration,
@@ -586,24 +618,18 @@ struct SynchronizedSignalGraphs: View {
                 guard frozenSnapshot == nil else { return }
                 let base = panBaseEnd ?? displayedRange.upperBound
                 let proposedEnd = base.addingTimeInterval(-offset)
-                if SignalTimelineScale.shouldFollowLatest(
+                pausedEnd = SignalTimelineScale.resolvedPausedEnd(
                     proposedEnd: proposedEnd,
                     latest: liveSnapshot.latestSignalTime,
                     visibleDuration: currentVisibleDuration
-                ) {
-                    pausedEnd = nil
-                } else {
-                    // Never persist an endpoint in the future. A viewport at
-                    // the newest edge is represented by `nil` and follows the
-                    // incoming stream; any earlier endpoint remains paused.
-                    pausedEnd = min(proposedEnd, liveSnapshot.latestSignalTime)
-                }
+                )
                 panBaseEnd = nil
                 panOffset = 0
             },
             onZoomChanged: { magnification in
                 guard frozenSnapshot == nil else { return }
                 if zoomBaseDuration == nil {
+                    zoomWasFollowingLatest = pausedEnd == nil
                     zoomBaseDuration = visibleDuration
                     zoomBaseCenter = displayedRange.lowerBound.addingTimeInterval(
                         displayedRange.upperBound.timeIntervalSince(displayedRange.lowerBound) / 2
@@ -612,17 +638,28 @@ struct SynchronizedSignalGraphs: View {
                 zoomMagnification = magnification
             },
             onZoomEnded: { magnification in
-                guard let baseDuration = zoomBaseDuration,
-                      let baseCenter = zoomBaseCenter
-                else { return }
+                guard let baseDuration = zoomBaseDuration else { return }
                 let duration = SignalTimelineScale.clampedDuration(
                     baseDuration / Double(max(magnification, 0.01))
                 )
+                let proposedEnd: Date
+                if zoomWasFollowingLatest {
+                    proposedEnd = liveSnapshot.latestSignalTime
+                } else if let baseCenter = zoomBaseCenter {
+                    proposedEnd = baseCenter.addingTimeInterval(duration / 2)
+                } else {
+                    proposedEnd = displayedRange.upperBound
+                }
                 visibleDuration = duration
-                pausedEnd = baseCenter.addingTimeInterval(duration / 2)
+                pausedEnd = SignalTimelineScale.resolvedPausedEnd(
+                    proposedEnd: proposedEnd,
+                    latest: liveSnapshot.latestSignalTime,
+                    visibleDuration: duration
+                )
                 zoomBaseDuration = nil
                 zoomBaseCenter = nil
                 zoomMagnification = 1
+                zoomWasFollowingLatest = false
             },
             onInspectionChanged: { timestamp in
                 if frozenSnapshot == nil {
@@ -634,6 +671,7 @@ struct SynchronizedSignalGraphs: View {
                     zoomBaseDuration = nil
                     zoomBaseCenter = nil
                     zoomMagnification = 1
+                    zoomWasFollowingLatest = false
                     frozenSnapshot = SignalGraphSnapshot(
                         heartRate: liveSnapshot.heartRate,
                         ecg: liveSnapshot.ecg,
@@ -665,6 +703,7 @@ struct SynchronizedSignalGraphs: View {
         zoomBaseDuration = nil
         zoomBaseCenter = nil
         zoomMagnification = 1
+        zoomWasFollowingLatest = false
     }
 }
 
@@ -749,10 +788,12 @@ private struct HeartRatePlot: View {
                 1
             )
             let displayRange = HeartRateGraphScale.displayRange(
-                // Keep the vertical scale stable while zooming and panning.
-                // Recomputing it from only the visible samples made unchanged
-                // BPM points appear to jump to different Y values.
-                for: points.map(\.bpm)
+                // Scale to what is on screen so an outlier outside the current
+                // time window cannot flatten the useful signal. displayRange
+                // includes every supplied value, so visible points are never
+                // percentile-clipped or drawn at a misleading Y coordinate.
+                for: points.map { (timestamp: $0.timestamp, bpm: $0.bpm) },
+                in: range
             )
             let ySpan = max(displayRange.upperBound - displayRange.lowerBound, 0.001)
             let yTicks = HeartRateGraphScale.axisTicks(
