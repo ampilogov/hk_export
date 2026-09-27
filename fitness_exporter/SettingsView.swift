@@ -1,5 +1,6 @@
 import HealthKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let isRecordingActive: Bool
@@ -18,6 +19,11 @@ struct SettingsView: View {
     @State private var isHKBackfillRunning: Bool = false
     @State private var showCursorResetConfirmation = false
     @State private var showBackfillResetConfirmation = false
+    @AppStorage(UserDefaultsKeys.ECG_EXPORT_DIRECTORY_BOOKMARK) private var ecgExportDirectoryBookmark = Data()
+    @AppStorage(UserDefaultsKeys.MIGRATE_LEGACY_HEART_RATES) private var migrateLegacyHeartRates = false
+    @State private var choosingECGExportDirectory = false
+    @State private var ecgExportDirectoryName = "Not selected"
+    @State private var ecgExportDirectoryError: String?
 
     init(isRecordingActive: Bool = false, isAppProcessing: Bool = false) {
         self.isRecordingActive = isRecordingActive
@@ -123,6 +129,17 @@ struct SettingsView: View {
             }
 
             Section(header: Text("SensorBag HealthKit")) {
+                Toggle("Migrate legacy heart rate samples", isOn: $migrateLegacyHeartRates)
+                    .disabled(resetControlsDisabled)
+                if migrateLegacyHeartRates {
+                    Text(
+                        "Backfill checks saved bags for old individual heart rate samples. "
+                            + "It removes only verified samples from this app after a replacement "
+                            + "series is readable. The switch turns off after a successful migration."
+                    )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 Button(isHKBackfillRunning ? "Backfilling..." : "Backfill missing HK data") {
                     runSensorBagBackfill()
                 }
@@ -145,7 +162,7 @@ struct SettingsView: View {
                     Button("Cancel", role: .cancel) { }
                 } message: {
                     Text(
-                        "Previously imported files will become pending again. "
+                        "Previously imported files and heart rate migrations will become pending again. "
                             + "No backfill starts automatically."
                     )
                 }
@@ -157,6 +174,16 @@ struct SettingsView: View {
                 }
             }
 
+            Section(header: Text("ECG export")) {
+                LabeledContent("Destination", value: ecgExportDirectoryName)
+                Button("Choose ECG export directory") {
+                    choosingECGExportDirectory = true
+                }
+                Text("Visible ECG samples and a PNG of both graphs are saved in an ECG Exports folder.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Section(header: Text("Logs")) {
                 Button("Clear logs") {
                     CustomLogger.clearLogs()
@@ -166,6 +193,33 @@ struct SettingsView: View {
                 .foregroundColor(.white)
                 .cornerRadius(8)
             }
+        }
+        .onAppear {
+            ecgExportDirectoryName = ECGGraphExport.directoryName(for: ecgExportDirectoryBookmark)
+        }
+        .fileImporter(
+            isPresented: $choosingECGExportDirectory,
+            allowedContentTypes: [.folder]
+        ) { result in
+            switch result {
+            case .success(let url):
+                do {
+                    ecgExportDirectoryBookmark = try ECGGraphExport.bookmark(for: url)
+                    ecgExportDirectoryName = url.lastPathComponent
+                } catch {
+                    ecgExportDirectoryError = error.localizedDescription
+                }
+            case .failure(let error):
+                ecgExportDirectoryError = error.localizedDescription
+            }
+        }
+        .alert("ECG export directory", isPresented: Binding(
+            get: { ecgExportDirectoryError != nil },
+            set: { if !$0 { ecgExportDirectoryError = nil } }
+        )) {
+            Button("OK") { ecgExportDirectoryError = nil }
+        } message: {
+            Text(ecgExportDirectoryError ?? "")
         }
     }
 
@@ -198,7 +252,9 @@ struct SettingsView: View {
         }
         isHKBackfillRunning = true
         hkBackfillStatusText = "Scanning saved files..."
-        SensorBagPersistence.backfillSavedBagsToHealthKit { summary in
+        SensorBagPersistence.backfillSavedBagsToHealthKit(
+            migrateLegacyHeartRates: migrateLegacyHeartRates
+        ) { summary in
             isHKBackfillRunning = false
             if let errorMessage = summary.errorMessage {
                 hkBackfillStatusText = "Backfill failed: \(errorMessage)"
@@ -207,8 +263,13 @@ struct SettingsView: View {
                     "Total \(summary.totalFiles), pending \(summary.pendingFiles), "
                     + "skipped \(summary.skippedByMemoryFiles), "
                     + "imported \(summary.importedFiles), "
+                    + "HR migrated \(summary.migratedHeartRateFiles), "
                     + "unchanged \(summary.unchangedFiles), "
                     + "failed \(summary.failedFiles)."
+                if migrateLegacyHeartRates && summary.totalFiles > 0 && summary.failedFiles == 0 {
+                    migrateLegacyHeartRates = false
+                    hkBackfillStatusText += " Legacy migration turned off."
+                }
             }
         }
     }

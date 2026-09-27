@@ -451,6 +451,92 @@ final class SensorBagCompatibilityTests: XCTestCase {
         XCTAssertEqual(subpaths, 2)
     }
 
+    func test_ECGTrace_sortsOutOfOrderPointsAndKeepsFixedYRange() {
+        let start = Date(timeIntervalSince1970: 100)
+        let points = [0.2, 0.0, 0.1].map {
+            ECGPlotPoint(timestamp: start.addingTimeInterval($0), voltage: 50)
+        }
+        let path = ECGTraceGeometry.path(
+            for: points,
+            in: start...start.addingTimeInterval(0.2),
+            size: CGSize(width: 200, height: 100),
+            fixedYRange: -100...100
+        )
+        var linePoints: [CGPoint] = []
+        path.cgPath.applyWithBlock {
+            if $0.pointee.type == .addLineToPoint {
+                linePoints.append($0.pointee.points[0])
+            }
+        }
+        XCTAssertEqual(linePoints.map(\.x), [0, 100, 200])
+        XCTAssertTrue(linePoints.allSatisfy { abs($0.y - 25) < 0.001 })
+    }
+
+    func test_ECGPlotBuffer_replacesOverlappingTailAndIgnoresStalePacket() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        func point(_ offset: TimeInterval, _ voltage: Int16) -> ECGPlotPoint {
+            ECGPlotPoint(timestamp: start.addingTimeInterval(offset), voltage: voltage)
+        }
+        var displayed = [point(0, 1), point(0.1, 2), point(0.2, 3)]
+        ECGPlotBuffer.merge([point(0.25, 5), point(0.15, 4)], into: &displayed)
+        XCTAssertEqual(displayed.map(\.voltage), [1, 2, 4, 5])
+        ECGPlotBuffer.merge([point(0.05, 99)], into: &displayed)
+        XCTAssertEqual(displayed.map(\.voltage), [1, 2, 4, 5])
+    }
+
+    func test_ECGExport_csvContainsOnlyVisibleECGSamples() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let points = [-5, 10, 20].enumerated().map { index, voltage in
+            ECGPlotPoint(timestamp: start.addingTimeInterval(Double(index)), voltage: Int16(voltage))
+        }
+        let csv = try XCTUnwrap(String(
+            data: ECGGraphExport.csv(
+                for: points,
+                in: start.addingTimeInterval(1)...start.addingTimeInterval(2)
+            ),
+            encoding: .utf8
+        ))
+        let rows = csv.split(separator: "\n")
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows[0], "timestamp,voltage_uV")
+        XCTAssertTrue(rows[1].hasSuffix(",10"))
+        XCTAssertTrue(rows[2].hasSuffix(",20"))
+        XCTAssertFalse(csv.contains(",-5"))
+    }
+
+    @MainActor
+    func test_ECGExport_writesCSVAndPNGToSelectedDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let start = Date(timeIntervalSince1970: 1_000)
+        let snapshot = SignalGraphSnapshot(
+            heartRate: [HeartRatePlotPoint(
+                timestamp: start,
+                bpm: 70,
+                beginsNewSegment: true
+            )],
+            ecg: [
+                ECGPlotPoint(timestamp: start, voltage: -15),
+                ECGPlotPoint(timestamp: start.addingTimeInterval(0.01), voltage: 20)
+            ],
+            stageMarkers: [],
+            lastPackageTime: nil,
+            latestSignalTime: start.addingTimeInterval(1),
+            range: start...start.addingTimeInterval(1)
+        )
+        let files = try await ECGGraphExport.save(
+            snapshot: snapshot,
+            bookmark: ECGGraphExport.bookmark(for: root)
+        )
+        XCTAssertEqual(files.csv.deletingLastPathComponent().lastPathComponent, "ECG Exports")
+        XCTAssertEqual(files.csv.deletingPathExtension().lastPathComponent,
+                       files.png.deletingPathExtension().lastPathComponent)
+        let csv = try XCTUnwrap(String(contentsOf: files.csv, encoding: .utf8))
+        XCTAssertEqual(csv.split(separator: "\n").count, 3)
+        XCTAssertNotNil(UIImage(data: try Data(contentsOf: files.png)))
+    }
+
     func test_v1ECGWindow_rejectsTruncatedPayload() {
         let data = SensorBag()._serializeV1([
             SensorEvent(
@@ -1869,6 +1955,178 @@ final class SensorBagCompatibilityTests: XCTestCase {
             )
         )
         XCTAssertEqual(try SensorBagBackfillIndex.records(in: root), [:])
+    }
+
+    func test_sensorBagBackfillIndex_tracksHeartRateMigrationSeparately() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modified = Date(timeIntervalSince1970: 1_000)
+        try SensorBagBackfillIndex.markHeartRateMigrationCompleted(
+            key: "continuous/recording.bin",
+            fileSize: 42,
+            lastModifiedAt: modified,
+            in: root
+        )
+        XCTAssertTrue(try SensorBagBackfillIndex.records(in: root).isEmpty)
+        XCTAssertEqual(
+            try SensorBagBackfillIndex.heartRateMigrationRecords(in: root)["continuous/recording.bin"]?.fileSize,
+            42
+        )
+        XCTAssertEqual(try SensorBagBackfillIndex.reset(in: root).removedRecords, 1)
+        XCTAssertTrue(try SensorBagBackfillIndex.heartRateMigrationRecords(in: root).isEmpty)
+    }
+
+    func test_legacyHeartRateMigration_selectsOnlyExactOwnSamples() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let bundleID = "com.artemz.fitness-exporter-my"
+        let firstID = UUID()
+        let secondID = UUID()
+        func sample(
+            _ id: UUID,
+            at timestamp: Date,
+            bpm: Double,
+            source: String = "com.artemz.fitness-exporter-my",
+            count: Int = 1,
+            metadataEmpty: Bool = true
+        ) -> SensorBagPersistence.LegacyHeartRateObservation {
+            .init(
+                id: id,
+                timestamp: timestamp,
+                duration: 0,
+                bpm: bpm,
+                count: count,
+                metadataEmpty: metadataEmpty,
+                sourceBundleIdentifier: source
+            )
+        }
+        let points = [(start, 70.0), (start.addingTimeInterval(1), 72.0)]
+        let own = [
+            sample(firstID, at: start, bpm: 70),
+            sample(secondID, at: start.addingTimeInterval(1), bpm: 72)
+        ]
+        let ignored = [
+            sample(UUID(), at: start, bpm: 70, count: 2),
+            sample(UUID(), at: start, bpm: 70, metadataEmpty: false),
+            sample(UUID(), at: start.addingTimeInterval(2), bpm: 70)
+        ]
+        XCTAssertEqual(
+            try SensorBagPersistence.legacyHeartRateSampleIDs(
+                points: points,
+                observations: own + ignored,
+                currentBundleIdentifier: bundleID
+            ),
+            Set([firstID, secondID])
+        )
+        XCTAssertThrowsError(try SensorBagPersistence.legacyHeartRateSampleIDs(
+            points: points,
+            observations: own + [sample(UUID(), at: start, bpm: 70, source: "watch")],
+            currentBundleIdentifier: bundleID
+        ))
+        XCTAssertThrowsError(try SensorBagPersistence.legacyHeartRateSampleIDs(
+            points: points,
+            observations: [sample(UUID(), at: start, bpm: 70, source: "com.artemz.fitness-exporter")],
+            currentBundleIdentifier: bundleID
+        ))
+        XCTAssertThrowsError(try SensorBagPersistence.legacyHeartRateSampleIDs(
+            points: points,
+            observations: own + [sample(UUID(), at: start, bpm: 70)],
+            currentBundleIdentifier: bundleID
+        ))
+    }
+
+    func test_heartRateSeriesVerification_requiresExactPointsAcrossSplitSamples() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let points = [
+            (start, 70.0),
+            (start.addingTimeInterval(1), 72.0),
+            (start.addingTimeInterval(2), 74.0),
+            (start.addingTimeInterval(3), 76.0)
+        ]
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = SensorBagPersistence.HeartRateSeriesObservation(
+            id: firstID, syncIdentifier: nil, points: Array(points.prefix(2))
+        )
+        let second = SensorBagPersistence.HeartRateSeriesObservation(
+            id: secondID, syncIdentifier: nil, points: Array(points.suffix(2))
+        )
+        XCTAssertEqual(
+            try SensorBagPersistence.matchingHeartRateSeriesIDs(
+                points: points, observations: [first, second], syncIdentifier: "bag-1"
+            ),
+            Set([firstID, secondID])
+        )
+        XCTAssertThrowsError(try SensorBagPersistence.matchingHeartRateSeriesIDs(
+            points: points, observations: [first], syncIdentifier: "bag-1"
+        ))
+
+        let unrelated = SensorBagPersistence.HeartRateSeriesObservation(
+            id: secondID,
+            syncIdentifier: nil,
+            points: [(start.addingTimeInterval(2), 99.0), (start.addingTimeInterval(3), 76.0)]
+        )
+        XCTAssertThrowsError(try SensorBagPersistence.matchingHeartRateSeriesIDs(
+            points: points, observations: [first, unrelated], syncIdentifier: "bag-1"
+        ))
+
+        let synced = [
+            SensorBagPersistence.HeartRateSeriesObservation(
+                id: firstID, syncIdentifier: "bag-1", points: Array(points.prefix(2))
+            ),
+            SensorBagPersistence.HeartRateSeriesObservation(
+                id: secondID, syncIdentifier: "bag-1", points: Array(points.suffix(2))
+            )
+        ]
+        XCTAssertEqual(try SensorBagPersistence.matchingHeartRateSeriesIDs(
+            points: points, observations: synced, syncIdentifier: "bag-1"
+        ), Set([firstID, secondID]))
+        XCTAssertThrowsError(try SensorBagPersistence.matchingHeartRateSeriesIDs(
+            points: points, observations: [synced[0]], syncIdentifier: "bag-1"
+        ))
+    }
+
+    func test_heartRateNormalization_excludesInvalidAndKeepsLastTimestampValue() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let points = [
+            (start, 70.0),
+            (start.addingTimeInterval(1), 0.0),
+            (start, 72.0),
+            (start.addingTimeInterval(2), 74.0)
+        ]
+        let normalized = SensorBagPersistence.normalizedHeartRatePoints(points)
+        XCTAssertEqual(normalized.count, 2)
+        XCTAssertEqual(normalized.map(\.0), [start, start.addingTimeInterval(2)])
+        XCTAssertEqual(normalized.map(\.1), [72, 74])
+    }
+
+    func test_legacyHeartRateMigration_includesExcludedZeroInDeletionCandidates() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let raw = [(start, 0.0), (start.addingTimeInterval(1), 72.0)]
+        let replacement = SensorBagPersistence.HeartRateSeriesObservation(
+            id: UUID(),
+            syncIdentifier: "bag-1",
+            points: SensorBagPersistence.normalizedHeartRatePoints(raw)
+        )
+        XCTAssertEqual(try SensorBagPersistence.matchingHeartRateSeriesIDs(
+            points: SensorBagPersistence.normalizedHeartRatePoints(raw),
+            observations: [replacement],
+            syncIdentifier: "bag-1"
+        ), Set([replacement.id]))
+
+        let zeroID = UUID()
+        XCTAssertEqual(try SensorBagPersistence.legacyHeartRateSampleIDs(
+            points: raw,
+            observations: [.init(
+                id: zeroID,
+                timestamp: start,
+                duration: 0,
+                bpm: 0,
+                count: 1,
+                metadataEmpty: true,
+                sourceBundleIdentifier: "com.artemz.fitness-exporter-my"
+            )],
+            currentBundleIdentifier: "com.artemz.fitness-exporter-my"
+        ), Set([zeroID]))
     }
 
     func test_sensorBagBackfillIndex_interruptedResetFinishesBeforeMigration() throws {

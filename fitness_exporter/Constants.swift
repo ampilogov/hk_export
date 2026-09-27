@@ -14,6 +14,8 @@ enum UserDefaultsKeys {
     static let HRV_RECORDING_INTERVAL = "hrvRecordingInterval"
     static let RECORDING_WATCHDOG_DELAY_SECONDS = "recordingWatchdogDelaySeconds"
     static let ACTIVE_CONTINUOUS_RECORDING = "activeContinuousRecording"
+    static let ECG_EXPORT_DIRECTORY_BOOKMARK = "ecgExportDirectoryBookmark"
+    static let MIGRATE_LEGACY_HEART_RATES = "migrateLegacyHeartRatesDuringBackfill"
 }
 
 enum HRVConstants {

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 enum HeartRateGraphScale {
     static func beatsPerMinute(forRR rrSeconds: Double) -> Double? {
@@ -340,13 +341,13 @@ struct RRBeatTimelineReconstructor {
     }
 }
 
-private struct HeartRatePlotPoint {
+struct HeartRatePlotPoint {
     let timestamp: Date
     let bpm: Double
     let beginsNewSegment: Bool
 }
 
-private struct SignalGraphSnapshot {
+struct SignalGraphSnapshot {
     let heartRate: [HeartRatePlotPoint]
     let ecg: [ECGPlotPoint]
     let stageMarkers: [Date]
@@ -385,10 +386,16 @@ struct SynchronizedSignalGraphs: View {
     @State private var zoomBaseDuration: TimeInterval?
     @State private var zoomBaseCenter: Date?
     @State private var zoomWasFollowingLatest = false
+    @State private var zoomHeartRateRange: ClosedRange<Double>?
+    @State private var zoomECGRange: ClosedRange<Double>?
     @State private var retainedHistory: SignalGraphSnapshot?
     @State private var frozenSnapshot: SignalGraphSnapshot?
     @State private var inspectionTime: Date?
     @State private var showExpanded = false
+    @AppStorage(UserDefaultsKeys.ECG_EXPORT_DIRECTORY_BOOKMARK) private var ecgExportDirectoryBookmark = Data()
+    @State private var choosingECGExportDirectory = false
+    @State private var pendingExport: SignalGraphSnapshot?
+    @State private var exportMessage: String?
 
     init(eventBridge: HRVEventBridge) {
         self.init(
@@ -498,6 +505,33 @@ struct SynchronizedSignalGraphs: View {
                 SignalGraphOrientation.enterFullScreen()
             }
         }
+        .fileImporter(
+            isPresented: $choosingECGExportDirectory,
+            allowedContentTypes: [.folder]
+        ) { result in
+            switch result {
+            case .success(let url):
+                do {
+                    ecgExportDirectoryBookmark = try ECGGraphExport.bookmark(for: url)
+                    if let pendingExport {
+                        self.pendingExport = nil
+                        saveECGExport(pendingExport)
+                    }
+                } catch {
+                    exportMessage = "Could not use the selected directory: \(error.localizedDescription)"
+                }
+            case .failure(let error):
+                exportMessage = "Directory selection failed: \(error.localizedDescription)"
+            }
+        }
+        .alert("ECG export", isPresented: Binding(
+            get: { exportMessage != nil },
+            set: { if !$0 { exportMessage = nil } }
+        )) {
+            Button("OK") { exportMessage = nil }
+        } message: {
+            Text(exportMessage ?? "")
+        }
     }
 
     private func compactContent(
@@ -522,7 +556,8 @@ struct SynchronizedSignalGraphs: View {
                 stageMarkers: snapshot.stageMarkers,
                 lastPackageTime: snapshot.lastPackageTime,
                 range: snapshot.range,
-                inspectionTime: inspectionTime
+                inspectionTime: inspectionTime,
+                fixedYRange: zoomHeartRateRange
             )
             .frame(height: 170)
             .overlay {
@@ -536,6 +571,11 @@ struct SynchronizedSignalGraphs: View {
                 Text("ECG")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
+                Button("Export", systemImage: "square.and.arrow.up") {
+                    exportVisibleECG(snapshot)
+                }
+                .font(.caption)
+                .disabled(!snapshot.ecg.contains { snapshot.range.contains($0.timestamp) })
                 Button("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") {
                     showExpanded = true
                 }
@@ -547,7 +587,8 @@ struct SynchronizedSignalGraphs: View {
             ECGTimelinePlot(
                 points: snapshot.ecg,
                 range: snapshot.range,
-                inspectionTime: inspectionTime
+                inspectionTime: inspectionTime,
+                fixedYRange: zoomECGRange
             )
             .frame(height: 150)
             .overlay {
@@ -574,6 +615,11 @@ struct SynchronizedSignalGraphs: View {
                     }
                     .font(.caption)
                 }
+                Button("Export", systemImage: "square.and.arrow.up") {
+                    exportVisibleECG(snapshot)
+                }
+                .font(.caption)
+                .disabled(!snapshot.ecg.contains { snapshot.range.contains($0.timestamp) })
                 Button("Done") {
                     dismiss()
                 }
@@ -584,7 +630,8 @@ struct SynchronizedSignalGraphs: View {
             ECGTimelinePlot(
                 points: snapshot.ecg,
                 range: snapshot.range,
-                inspectionTime: inspectionTime
+                inspectionTime: inspectionTime,
+                fixedYRange: zoomECGRange
             )
             .frame(maxHeight: .infinity)
             .layoutPriority(1)
@@ -603,7 +650,8 @@ struct SynchronizedSignalGraphs: View {
                 stageMarkers: snapshot.stageMarkers,
                 lastPackageTime: snapshot.lastPackageTime,
                 range: snapshot.range,
-                inspectionTime: inspectionTime
+                inspectionTime: inspectionTime,
+                fixedYRange: zoomHeartRateRange
             )
             .frame(height: 90)
             .overlay {
@@ -637,7 +685,7 @@ struct SynchronizedSignalGraphs: View {
         SignalGraphInteractionLayer(
             range: displayedRange,
             onPanChanged: { offset in
-                guard frozenSnapshot == nil else { return }
+                guard frozenSnapshot == nil, zoomBaseDuration == nil else { return }
                 if panBaseEnd == nil {
                     panBaseEnd = displayedRange.upperBound
                     panStartedFromHistory = pausedEnd != nil || retainedHistory != nil
@@ -648,7 +696,7 @@ struct SynchronizedSignalGraphs: View {
                 panOffset = offset
             },
             onPanEnded: { offset in
-                guard frozenSnapshot == nil else { return }
+                guard frozenSnapshot == nil, zoomBaseDuration == nil else { return }
                 let base = panBaseEnd ?? displayedRange.upperBound
                 let proposedEnd = base.addingTimeInterval(-offset)
                 if panStartedFromHistory {
@@ -669,9 +717,12 @@ struct SynchronizedSignalGraphs: View {
                 panOffset = 0
                 panStartedFromHistory = false
             },
-            onZoomChanged: { _ in
+            onZoomChanged: { magnification in
                 guard frozenSnapshot == nil else { return }
                 if zoomBaseDuration == nil {
+                    panBaseEnd = nil
+                    panOffset = 0
+                    panStartedFromHistory = false
                     zoomWasFollowingLatest = pausedEnd == nil
                     zoomBaseDuration = visibleDuration
                     zoomBaseCenter = displayedRange.lowerBound.addingTimeInterval(
@@ -680,9 +731,21 @@ struct SynchronizedSignalGraphs: View {
                     if pausedEnd != nil, retainedHistory == nil {
                         retainedHistory = navigationSnapshot
                     }
-                    // Keep both charts completely still until the pinch ends.
-                    frozenSnapshot = navigationSnapshot
+                    zoomHeartRateRange = HeartRateGraphScale.displayRange(
+                        for: navigationSnapshot.heartRate.map {
+                            (timestamp: $0.timestamp, bpm: $0.bpm)
+                        },
+                        in: displayedRange
+                    )
+                    zoomECGRange = ECGTraceGeometry.displayRange(
+                        for: navigationSnapshot.ecg,
+                        in: displayedRange
+                    )
                 }
+                visibleDuration = SignalTimelineScale.zoomedDuration(
+                    baseDuration: zoomBaseDuration ?? visibleDuration,
+                    magnification: Double(magnification)
+                )
             },
             onZoomEnded: { magnification in
                 guard let baseDuration = zoomBaseDuration else { return }
@@ -711,7 +774,8 @@ struct SynchronizedSignalGraphs: View {
                 zoomBaseDuration = nil
                 zoomBaseCenter = nil
                 zoomWasFollowingLatest = false
-                frozenSnapshot = nil
+                zoomHeartRateRange = nil
+                zoomECGRange = nil
             },
             onInspectionChanged: { timestamp in
                 if frozenSnapshot == nil {
@@ -724,6 +788,8 @@ struct SynchronizedSignalGraphs: View {
                     zoomBaseDuration = nil
                     zoomBaseCenter = nil
                     zoomWasFollowingLatest = false
+                    zoomHeartRateRange = nil
+                    zoomECGRange = nil
                     if pausedEnd == nil {
                         retainedHistory = nil
                     }
@@ -763,8 +829,32 @@ struct SynchronizedSignalGraphs: View {
         zoomBaseDuration = nil
         zoomBaseCenter = nil
         zoomWasFollowingLatest = false
+        zoomHeartRateRange = nil
+        zoomECGRange = nil
         retainedHistory = nil
         frozenSnapshot = nil
+    }
+
+    private func exportVisibleECG(_ snapshot: SignalGraphSnapshot) {
+        guard ECGGraphExport.hasDirectory(ecgExportDirectoryBookmark) else {
+            pendingExport = snapshot
+            choosingECGExportDirectory = true
+            return
+        }
+        saveECGExport(snapshot)
+    }
+
+    @MainActor
+    private func saveECGExport(_ snapshot: SignalGraphSnapshot) {
+        let bookmark = ecgExportDirectoryBookmark
+        Task { @MainActor in
+            do {
+                let files = try await ECGGraphExport.save(snapshot: snapshot, bookmark: bookmark)
+                exportMessage = "Exported \(files.csv.lastPathComponent) and \(files.png.lastPathComponent)."
+            } catch {
+                exportMessage = "ECG export failed: \(error.localizedDescription)"
+            }
+        }
     }
 }
 
@@ -824,6 +914,7 @@ private struct HeartRatePlot: View {
     let lastPackageTime: Date?
     let range: ClosedRange<Date>
     let inspectionTime: Date?
+    var fixedYRange: ClosedRange<Double>? = nil
 
     private var visiblePoints: [HeartRatePlotPoint] {
         points.filter { range.contains($0.timestamp) }
@@ -848,7 +939,7 @@ private struct HeartRatePlot: View {
                 size.height - SignalChartLayout.top - SignalChartLayout.timeAxisHeight,
                 1
             )
-            let displayRange = HeartRateGraphScale.displayRange(
+            let displayRange = fixedYRange ?? HeartRateGraphScale.displayRange(
                 // Scale to what is on screen so an outlier outside the current
                 // time window cannot flatten the useful signal. displayRange
                 // includes every supplied value, so visible points are never
@@ -1002,24 +1093,39 @@ private struct HeartRatePlot: View {
 enum ECGTraceGeometry {
     static let maximumConnectedInterval: TimeInterval = 0.1
 
+    static func displayRange(
+        for points: [ECGPlotPoint],
+        in range: ClosedRange<Date>
+    ) -> ClosedRange<Double> {
+        let values = points.lazy.filter { range.contains($0.timestamp) }.map { Double($0.voltage) }
+        guard let minimum = values.min(), let maximum = values.max() else { return -1...1 }
+        guard minimum == maximum else { return minimum...maximum }
+        let padding = max(abs(minimum) * 0.05, 1)
+        return (minimum - padding)...(maximum + padding)
+    }
+
     static func path(
         for points: [ECGPlotPoint],
         in range: ClosedRange<Date>,
-        size: CGSize
+        size: CGSize,
+        fixedYRange: ClosedRange<Double>? = nil
     ) -> Path {
         let duration = range.upperBound.timeIntervalSince(range.lowerBound)
-        let visible = points.filter { range.contains($0.timestamp) }
+        var visible = points.filter { range.contains($0.timestamp) }
+        if zip(visible, visible.dropFirst()).contains(where: { $0.0.timestamp > $0.1.timestamp }) {
+            visible.sort { $0.timestamp < $1.timestamp }
+        }
         guard duration > 0, duration.isFinite,
               size.width > 0, size.height > 0,
-              let minimum = visible.map(\.voltage).min(),
-              let maximum = visible.map(\.voltage).max() else { return Path() }
-        let padding = minimum == maximum ? max(abs(Double(minimum)) * 0.05, 1) : 0
-        let voltageMin = Double(minimum) - padding
-        let voltageSpan = max(Double(maximum) + padding - voltageMin, 1)
+              !visible.isEmpty else { return Path() }
+        let voltageRange = fixedYRange ?? displayRange(for: visible, in: range)
+        let voltageMin = voltageRange.lowerBound
+        let voltageSpan = max(voltageRange.upperBound - voltageMin, 1)
         var path = Path()
         var previousTimestamp: Date?
 
         for sample in visible {
+            if let previousTimestamp, sample.timestamp == previousTimestamp { continue }
             let point = CGPoint(
                 x: sample.timestamp.timeIntervalSince(range.lowerBound) / duration * size.width,
                 y: (1 - (Double(sample.voltage) - voltageMin) / voltageSpan) * size.height
@@ -1042,6 +1148,8 @@ private struct ECGTimelinePlot: View {
     let points: [ECGPlotPoint]
     let range: ClosedRange<Date>
     let inspectionTime: Date?
+    var fixedYRange: ClosedRange<Double>? = nil
+    var alwaysRender = false
 
     private var visiblePoints: [ECGPlotPoint] {
         points.filter { range.contains($0.timestamp) }
@@ -1071,6 +1179,7 @@ private struct ECGTimelinePlot: View {
                 1
             )
             let timeTicks = SignalTimelineScale.timeTicks(in: range)
+            let visible = visiblePoints
 
             func xPosition(_ date: Date) -> CGFloat {
                 SignalChartLayout.leading
@@ -1103,8 +1212,8 @@ private struct ECGTimelinePlot: View {
                 )
             }
 
-            if SignalTimelineScale.shouldRenderECG(visibleDuration: duration) {
-                if visiblePoints.isEmpty {
+            if alwaysRender || SignalTimelineScale.shouldRenderECG(visibleDuration: duration) {
+                if visible.isEmpty {
                     context.draw(
                         Text("No ECG in this window")
                             .font(.caption)
@@ -1120,10 +1229,12 @@ private struct ECGTimelinePlot: View {
                         x: SignalChartLayout.leading,
                         y: SignalChartLayout.top
                     )
+                    traceContext.clip(to: Path(CGRect(x: 0, y: 0, width: plotWidth, height: plotHeight)))
                     let path = ECGTraceGeometry.path(
-                        for: visiblePoints,
+                        for: visible,
                         in: range,
-                        size: CGSize(width: plotWidth, height: plotHeight)
+                        size: CGSize(width: plotWidth, height: plotHeight),
+                        fixedYRange: fixedYRange
                     )
                     traceContext.stroke(
                         path,
@@ -1174,6 +1285,155 @@ private struct ECGTimelinePlot: View {
     }
 }
 
+/// Saves the visible ECG samples and a rendered image of the same ECG/HR window.
+enum ECGGraphExport {
+    static func bookmark(for url: URL) throws -> Data {
+        let hasAccess = url.startAccessingSecurityScopedResource()
+        defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+        return try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    static func directoryName(for bookmark: Data) -> String {
+        guard let url = resolve(bookmark) else { return "Not selected" }
+        return url.lastPathComponent
+    }
+
+    static func hasDirectory(_ bookmark: Data) -> Bool {
+        resolve(bookmark) != nil
+    }
+
+    static func fileStamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyMMdd_HHmmss"
+        return formatter.string(from: date)
+    }
+
+    static func csv(for points: [ECGPlotPoint], in range: ClosedRange<Date>) -> Data {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var text = "timestamp,voltage_uV\n"
+        text.reserveCapacity(points.count * 36)
+        for point in points.filter({ range.contains($0.timestamp) }).sorted(by: { $0.timestamp < $1.timestamp }) {
+            text += "\(formatter.string(from: point.timestamp)),\(point.voltage)\n"
+        }
+        return Data(text.utf8)
+    }
+
+    @MainActor
+    static func save(
+        snapshot: SignalGraphSnapshot,
+        bookmark: Data
+    ) async throws -> (csv: URL, png: URL) {
+        guard snapshot.ecg.contains(where: { snapshot.range.contains($0.timestamp) }) else {
+            throw exportError("There are no ECG samples in the visible window.")
+        }
+        let renderer = ImageRenderer(content: ECGGraphExportImage(snapshot: snapshot))
+        renderer.scale = 2
+        guard let pngData = renderer.uiImage?.pngData() else {
+            throw exportError("Could not render the ECG image.")
+        }
+        let csvData = csv(for: snapshot.ecg, in: snapshot.range)
+        let stampDate = snapshot.range.upperBound
+        return try await Task.detached(priority: .utility) {
+            try write(csvData: csvData, pngData: pngData, stampDate: stampDate, bookmark: bookmark)
+        }.value
+    }
+
+    private static func write(
+        csvData: Data,
+        pngData: Data,
+        stampDate: Date,
+        bookmark: Data
+    ) throws -> (csv: URL, png: URL) {
+        guard let directory = resolve(bookmark) else {
+            throw exportError("Choose an ECG export directory in Settings.")
+        }
+        let hasAccess = directory.startAccessingSecurityScopedResource()
+        defer { if hasAccess { directory.stopAccessingSecurityScopedResource() } }
+        let folder = directory.appendingPathComponent("ECG Exports", isDirectory: true)
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var result: Result<(csv: URL, png: URL), Error>?
+        coordinator.coordinate(writingItemAt: folder, options: [], error: &coordinationError) { coordinatedFolder in
+            result = Result {
+                try FileManager.default.createDirectory(at: coordinatedFolder, withIntermediateDirectories: true)
+                let stamp = fileStamp(for: stampDate)
+                var suffix = 0
+                var csvURL: URL
+                var pngURL: URL
+                repeat {
+                    let base = "ECG_\(stamp)" + (suffix == 0 ? "" : "_\(suffix)")
+                    csvURL = coordinatedFolder.appendingPathComponent(base + ".csv")
+                    pngURL = coordinatedFolder.appendingPathComponent(base + ".png")
+                    suffix += 1
+                } while FileManager.default.fileExists(atPath: csvURL.path)
+                    || FileManager.default.fileExists(atPath: pngURL.path)
+
+                try csvData.write(to: csvURL, options: .atomic)
+                do {
+                    try pngData.write(to: pngURL, options: .atomic)
+                } catch {
+                    try? FileManager.default.removeItem(at: csvURL)
+                    throw error
+                }
+                return (csvURL, pngURL)
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw exportError("The export directory was unavailable.") }
+        return try result.get()
+    }
+
+    private static func resolve(_ bookmark: Data) -> URL? {
+        guard !bookmark.isEmpty else { return nil }
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: bookmark,
+            options: .withoutImplicitStartAccessing,
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        ), !stale else { return nil }
+        return url
+    }
+
+    private static func exportError(_ message: String) -> NSError {
+        NSError(domain: "ECGGraphExport", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+private struct ECGGraphExportImage: View {
+    let snapshot: SignalGraphSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ECG")
+                .font(.headline)
+            ECGTimelinePlot(
+                points: snapshot.ecg,
+                range: snapshot.range,
+                inspectionTime: nil,
+                alwaysRender: true
+            )
+            .frame(height: 440)
+            Text("Heart Rate")
+                .font(.headline)
+            HeartRatePlot(
+                points: snapshot.heartRate,
+                stageMarkers: snapshot.stageMarkers,
+                lastPackageTime: snapshot.lastPackageTime,
+                range: snapshot.range,
+                inspectionTime: nil
+            )
+            .frame(height: 170)
+        }
+        .padding(24)
+        .frame(width: 1200, height: 720)
+        .background(Color(UIColor.systemBackground))
+    }
+}
+
 private struct SignalGraphInteractionLayer: View {
     let range: ClosedRange<Date>
     let onPanChanged: (TimeInterval) -> Void
@@ -1185,6 +1445,10 @@ private struct SignalGraphInteractionLayer: View {
 
     @State private var isInspecting = false
     @State private var suppressPanEnd = false
+    @State private var isPinching = false
+    @State private var lastMagnification: CGFloat = 1
+    @GestureState private var pinchGestureActive = false
+    @GestureState private var dragGestureActive = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -1196,6 +1460,12 @@ private struct SignalGraphInteractionLayer: View {
 
             Color.clear
                 .contentShape(Rectangle())
+                .onChange(of: pinchGestureActive) { _, active in
+                    if !active { finishPinch(lastMagnification) }
+                }
+                .onChange(of: dragGestureActive) { _, active in
+                    if !active { clearPanSuppressionWhenIdle() }
+                }
                 .highPriorityGesture(
                     LongPressGesture(minimumDuration: 0.25, maximumDistance: 12)
                         .sequenced(before: DragGesture(minimumDistance: 0))
@@ -1222,14 +1492,17 @@ private struct SignalGraphInteractionLayer: View {
                 )
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
+                        .updating($dragGestureActive) { _, active, _ in active = true }
                         .onChanged { value in
-                            guard !isInspecting else { return }
+                            guard !isInspecting, !isPinching, !suppressPanEnd else { return }
                             onPanChanged(
                                 Double(value.translation.width / plotWidth) * duration
                             )
                         }
                         .onEnded { value in
-                            guard !isInspecting, !suppressPanEnd else { return }
+                            let shouldSuppress = isInspecting || isPinching || suppressPanEnd
+                            if !isPinching { suppressPanEnd = false }
+                            guard !shouldSuppress else { return }
                             onPanEnded(
                                 Double(value.translation.width / plotWidth) * duration
                             )
@@ -1237,15 +1510,31 @@ private struct SignalGraphInteractionLayer: View {
                 )
                 .simultaneousGesture(
                     MagnificationGesture()
+                        .updating($pinchGestureActive) { _, active, _ in active = true }
                         .onChanged { value in
                             guard !isInspecting else { return }
+                            isPinching = true
+                            suppressPanEnd = true
+                            lastMagnification = value
                             onZoomChanged(value)
                         }
                         .onEnded { value in
-                            guard !isInspecting else { return }
-                            onZoomEnded(value)
+                            finishPinch(value)
                         }
                 )
+        }
+    }
+
+    private func finishPinch(_ magnification: CGFloat) {
+        guard isPinching else { return }
+        onZoomEnded(magnification)
+        isPinching = false
+        clearPanSuppressionWhenIdle()
+    }
+
+    private func clearPanSuppressionWhenIdle() {
+        DispatchQueue.main.async {
+            if !isPinching && !dragGestureActive { suppressPanEnd = false }
         }
     }
 

@@ -1,6 +1,28 @@
 import Combine
 import Foundation
 
+enum ECGPlotBuffer {
+    static func merge(
+        _ incoming: [ECGPlotPoint],
+        into existing: inout [ECGPlotPoint]
+    ) {
+        let sortedIncoming = incoming.sorted { $0.timestamp < $1.timestamp }
+        guard let first = sortedIncoming.first, let last = sortedIncoming.last else { return }
+        guard let previousEnd = existing.last?.timestamp else {
+            existing.append(contentsOf: sortedIncoming)
+            return
+        }
+        // A delayed packet entirely behind the plotted stream is stale.
+        guard last.timestamp > previousEnd else { return }
+        // A clock reanchor can overlap the tail already on screen. The newer
+        // packet replaces that tail so two traces cannot share one time span.
+        while let tail = existing.last, tail.timestamp >= first.timestamp {
+            existing.removeLast()
+        }
+        existing.append(contentsOf: sortedIncoming)
+    }
+}
+
 /// Bridges BluetoothManager sensor events to UI-friendly published values
 /// and maintains the RR-interval graph model. Subscribes once.
 final class HRVEventBridge: ObservableObject {
@@ -103,7 +125,7 @@ final class HRVEventBridge: ObservableObject {
                 timeline: &ecgTimeline
             )
             guard !newPoints.isEmpty else { return }
-            recentECGPointBuffer.append(contentsOf: newPoints)
+            ECGPlotBuffer.merge(newPoints, into: &recentECGPointBuffer)
             advanceGraphWindow(to: event.timestamp)
 
         case .accSamples(let samples):

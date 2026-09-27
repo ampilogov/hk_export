@@ -44,7 +44,29 @@ final class SensorBagBackfillIndex {
 
     static func records(in rootURL: URL) throws -> [String: SensorBagBackfillRecord] {
         try withIndex(in: rootURL, migrateLegacyRecords: true) {
-            try $0.records()
+            try $0.records(table: "completed_backfills")
+        }
+    }
+
+    static func heartRateMigrationRecords(in rootURL: URL) throws -> [String: SensorBagBackfillRecord] {
+        try withIndex(in: rootURL, migrateLegacyRecords: true) {
+            try $0.records(table: "completed_hr_migrations")
+        }
+    }
+
+    static func markHeartRateMigrationCompleted(
+        key: String,
+        fileSize: Int64,
+        lastModifiedAt: Date,
+        in rootURL: URL
+    ) throws {
+        let record = SensorBagBackfillRecord(
+            fileSize: fileSize,
+            lastModifiedAt: lastModifiedAt,
+            completedAt: Date()
+        )
+        try withIndex(in: rootURL, migrateLegacyRecords: true) {
+            try $0.upsert([key: record], table: "completed_hr_migrations")
         }
     }
 
@@ -160,11 +182,11 @@ final class SensorBagBackfillIndex {
         Self.legacyURL(in: rootURL)
     }
 
-    private func records() throws -> [String: SensorBagBackfillRecord] {
+    private func records(table: String) throws -> [String: SensorBagBackfillRecord] {
         let statement = try prepare(
             """
             SELECT file_key, file_size, modified_at, completed_at
-            FROM completed_backfills;
+            FROM \(table);
             """
         )
         defer { sqlite3_finalize(statement) }
@@ -243,6 +265,16 @@ final class SensorBagBackfillIndex {
             ) WITHOUT ROWID;
             """
         )
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS completed_hr_migrations (
+                file_key TEXT PRIMARY KEY NOT NULL,
+                file_size INTEGER NOT NULL CHECK(file_size >= 0),
+                modified_at REAL NOT NULL,
+                completed_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            """
+        )
     }
 
     /// The JSON file remains the source of truth until every decoded entry is
@@ -287,7 +319,7 @@ final class SensorBagBackfillIndex {
             try upsertWithoutTransaction(legacyRecords)
         }
 
-        let committedRecords = try records()
+        let committedRecords = try records(table: "completed_backfills")
         for (key, legacyRecord) in legacyRecords {
             guard committedRecords[key] == legacyRecord else {
                 throw SensorBagBackfillIndexError.operation(
@@ -303,19 +335,23 @@ final class SensorBagBackfillIndex {
         }
     }
 
-    private func upsert(_ records: [String: SensorBagBackfillRecord]) throws {
+    private func upsert(
+        _ records: [String: SensorBagBackfillRecord],
+        table: String = "completed_backfills"
+    ) throws {
         try performTransaction {
-            try upsertWithoutTransaction(records)
+            try upsertWithoutTransaction(records, table: table)
         }
     }
 
     private func upsertWithoutTransaction(
-        _ records: [String: SensorBagBackfillRecord]
+        _ records: [String: SensorBagBackfillRecord],
+        table: String = "completed_backfills"
     ) throws {
         guard !records.isEmpty else { return }
         let statement = try prepare(
             """
-            INSERT INTO completed_backfills (
+            INSERT INTO \(table) (
                 file_key, file_size, modified_at, completed_at
             ) VALUES (?, ?, ?, ?)
             ON CONFLICT(file_key) DO UPDATE SET
@@ -463,7 +499,8 @@ final class SensorBagBackfillIndex {
                     migrateLegacyRecords: false
                 )
                 defer { index.closeDatabase() }
-                removedKeys.formUnion(try index.records().keys)
+                removedKeys.formUnion(try index.records(table: "completed_backfills").keys)
+                removedKeys.formUnion(try index.records(table: "completed_hr_migrations").keys)
             } catch {
                 if reportUnreadableState {
                     warnings.append(

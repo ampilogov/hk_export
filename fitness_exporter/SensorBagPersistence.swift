@@ -86,6 +86,7 @@ enum SensorBagPersistence {
         let unchangedFiles: Int
         let failedFiles: Int
         let errorMessage: String?
+        var migratedHeartRateFiles: Int = 0
     }
 
     private static let syncVersion = NSNumber(value: 1)
@@ -123,6 +124,7 @@ enum SensorBagPersistence {
 
     private struct ActiveBackfill {
         let onlyPending: Bool
+        let migrateLegacyHeartRates: Bool
         var completions: [(BackfillSummary) -> Void]
     }
 
@@ -329,9 +331,14 @@ enum SensorBagPersistence {
     /// By default, only files not marked as backfilled are processed.
     static func backfillSavedBagsToHealthKit(
         onlyPending: Bool = true,
+        migrateLegacyHeartRates: Bool = false,
         completion: @escaping (BackfillSummary) -> Void
     ) {
-        switch beginBackfill(onlyPending: onlyPending, completion: completion) {
+        switch beginBackfill(
+            onlyPending: onlyPending,
+            migrateLegacyHeartRates: migrateLegacyHeartRates,
+            completion: completion
+        ) {
         case .start:
             break
         case .joined:
@@ -358,23 +365,34 @@ enum SensorBagPersistence {
 
         DispatchQueue.global(qos: .utility).async {
             let allFiles: [(URL, Profile)]
-            let pendingFiles: [(URL, Profile)]
+            let pendingFiles: [(URL, Profile, Bool)]
             let skippedByMemory: Int
             do {
                 allFiles = try listSavedFilesForBackfill()
-                if onlyPending {
-                    let memorySnapshot = try SensorBagBackfillIndex.records(
-                        in: documentsDirectory()
-                    )
-                    pendingFiles = try allFiles.filter {
-                        try !isFileMarkedBackfilled(
-                            fileURL: $0.0,
-                            profile: $0.1,
+                let memorySnapshot = try SensorBagBackfillIndex.records(in: documentsDirectory())
+                let migrationSnapshot = migrateLegacyHeartRates
+                    ? try SensorBagBackfillIndex.heartRateMigrationRecords(in: documentsDirectory())
+                    : [:]
+                pendingFiles = try allFiles.compactMap { fileURL, profile in
+                    let imported = try isFileMarkedBackfilled(
+                            fileURL: fileURL,
+                            profile: profile,
                             index: memorySnapshot
+                    )
+                    let migrated: Bool
+                    if migrateLegacyHeartRates {
+                        migrated = try isFileMarkedBackfilled(
+                            fileURL: fileURL,
+                            profile: profile,
+                            index: migrationSnapshot
                         )
+                    } else {
+                        migrated = true
                     }
-                } else {
-                    pendingFiles = allFiles
+                    if onlyPending && imported && migrated {
+                        return nil
+                    }
+                    return (fileURL, profile, imported)
                 }
                 skippedByMemory = max(0, allFiles.count - pendingFiles.count)
             } catch {
@@ -413,11 +431,11 @@ enum SensorBagPersistence {
                 var imported = 0
                 var unchanged = 0
                 var failed = 0
+                var migrated = 0
 
                 func process(_ idx: Int) {
                     guard idx < pendingFiles.count else {
-                        finish(
-                            BackfillSummary(
+                        var summary = BackfillSummary(
                                 totalFiles: allFiles.count,
                                 pendingFiles: pendingFiles.count,
                                 skippedByMemoryFiles: skippedByMemory,
@@ -426,17 +444,14 @@ enum SensorBagPersistence {
                                 failedFiles: failed,
                                 errorMessage: nil
                             )
-                        )
+                        summary.migratedHeartRateFiles = migrated
+                        finish(summary)
                         return
                     }
 
-                    let (fileURL, profile) = pendingFiles[idx]
-                    importSavedBagToHealthKit(
-                        fileURL: fileURL,
-                        profile: profile,
-                        deviceName: nil
-                    ) { result in
-                        switch result {
+                    let (fileURL, profile, alreadyBackfilled) = pendingFiles[idx]
+                    func finishFile(_ finalResult: ImportResult, migratedFile: Bool = false) {
+                        switch finalResult {
                         case .imported:
                             imported += 1
                         case .alreadyPresent, .noData:
@@ -448,7 +463,43 @@ enum SensorBagPersistence {
                                     + "\(fileURL.lastPathComponent): \(reason)"
                             )
                         }
+                        if migratedFile { migrated += 1 }
                         process(idx + 1)
+                    }
+                    func afterImport(_ result: ImportResult) {
+                        guard migrateLegacyHeartRates else {
+                            finishFile(result)
+                            return
+                        }
+                        if case .failed = result {
+                            finishFile(result)
+                            return
+                        }
+                        migrateLegacyHeartRatesForSavedBag(
+                            fileURL: fileURL,
+                            profile: profile
+                        ) { migrationResult in
+                            switch migrationResult {
+                            case .failed:
+                                finishFile(migrationResult)
+                            case .imported:
+                                finishFile(result, migratedFile: true)
+                            case .alreadyPresent, .noData:
+                                finishFile(result)
+                            }
+                        }
+                    }
+                    if migrateLegacyHeartRates && alreadyBackfilled {
+                        // Existing backfill memory means the series was already imported.
+                        // Query it before any write so denied read access cannot create duplicates.
+                        afterImport(.alreadyPresent)
+                    } else {
+                        importSavedBagToHealthKit(
+                            fileURL: fileURL,
+                            profile: profile,
+                            deviceName: nil,
+                            completion: afterImport
+                        )
                     }
                 }
 
@@ -844,6 +895,7 @@ enum SensorBagPersistence {
 
     private static func beginBackfill(
         onlyPending: Bool,
+        migrateLegacyHeartRates: Bool,
         completion: @escaping (BackfillSummary) -> Void
     ) -> BackfillCoordination {
         workStateLock.lock()
@@ -853,7 +905,8 @@ enum SensorBagPersistence {
             return .rejected("HealthKit backfill memory is being reset")
         }
         if var activeBackfill {
-            guard activeBackfill.onlyPending == onlyPending else {
+            guard activeBackfill.onlyPending == onlyPending,
+                  activeBackfill.migrateLegacyHeartRates == migrateLegacyHeartRates else {
                 return .rejected("A different HealthKit backfill is already running")
             }
             activeBackfill.completions.append(completion)
@@ -862,6 +915,7 @@ enum SensorBagPersistence {
         }
         activeBackfill = ActiveBackfill(
             onlyPending: onlyPending,
+            migrateLegacyHeartRates: migrateLegacyHeartRates,
             completions: [completion]
         )
         return .start
@@ -1054,7 +1108,7 @@ enum SensorBagPersistence {
             return
         }
 
-        let sorted = points.sorted { $0.0 < $1.0 }.filter { $0.1.isFinite && $0.1 > 0 }
+        let sorted = normalizedHeartRatePoints(points)
         guard let startDate = sorted.first?.0, let endDate = sorted.last?.0 else {
             completion?(.noData)
             return
@@ -1085,11 +1139,15 @@ enum SensorBagPersistence {
             }
 
             let metadata = syncIdentifier.map { syncMetadata(syncIdentifier: $0) }
-            builder.finishSeries(metadata: metadata, endDate: endDate) { _, error in
+            builder.finishSeries(metadata: metadata, endDate: endDate) { samples, error in
                 if let error {
                     let message = "Can't finish HR series: \(error.localizedDescription)"
                     CustomLogger.log("[SensorBag][HK] \(message)")
                     completion?(.failed(message))
+                    return
+                }
+                guard !(samples?.isEmpty ?? true) else {
+                    completion?(.failed("HR series builder returned no samples"))
                     return
                 }
                 completion?(.imported)
@@ -1100,6 +1158,7 @@ enum SensorBagPersistence {
             hasLegacyHeartRateSeries(
                 points: sorted,
                 deviceName: deviceName,
+                syncIdentifier: syncIdentifier,
                 store: store
             ) { result in
                 switch result {
@@ -1122,29 +1181,7 @@ enum SensorBagPersistence {
         case .newFile:
             writeSeries()
         case .recovery:
-            if let syncIdentifier {
-                hasSample(
-                    withSyncIdentifier: syncIdentifier,
-                    sampleType: hrType,
-                    store: store
-                ) { result in
-                    switch result {
-                    case .success(true):
-                        completion?(.alreadyPresent)
-                    case .success(false):
-                        checkLegacyThenWrite()
-                    case .failure(let error):
-                        completion?(
-                            .failed(
-                                "Can't check heart-rate sync identifier: "
-                                    + error.localizedDescription
-                            )
-                        )
-                    }
-                }
-            } else {
-                checkLegacyThenWrite()
-            }
+            checkLegacyThenWrite()
         }
     }
 
@@ -1235,6 +1272,7 @@ enum SensorBagPersistence {
     private static func hasLegacyHeartRateSeries(
         points: [(Date, Double)],
         deviceName: String?,
+        syncIdentifier: String?,
         store: HKHealthStore,
         completion: @escaping (Result<Bool, Error>) -> Void
     ) {
@@ -1251,27 +1289,406 @@ enum SensorBagPersistence {
             end: end.addingTimeInterval(1),
             options: []
         )
-        let query = HKSampleQuery(sampleType: hrType, predicate: predicate, limit: 50, sortDescriptors: nil) {
+        let query = HKSampleQuery(
+            sampleType: hrType,
+            predicate: predicate,
+            limit: HKObjectQueryNoLimit,
+            sortDescriptors: nil
+        ) {
             _, samples, error in
             if let error {
                 completion(.failure(error))
                 return
             }
-            let expectedCount = points.count
-            let bundleIdentifier = Bundle.main.bundleIdentifier
-            let exists = (samples as? [HKQuantitySample])?.contains { sample in
-                let sourceMatches = bundleIdentifier == nil
-                    || sample.sourceRevision.source.bundleIdentifier == bundleIdentifier
-                let deviceMatches = deviceName == nil || sample.device?.name == deviceName
-                return sourceMatches
-                    && deviceMatches
-                    && sample.count == expectedCount
-                    && abs(sample.startDate.timeIntervalSince(start)) < 1
-                    && abs(sample.endDate.timeIntervalSince(end)) < 1
-            } ?? false
-            completion(.success(exists))
+            verifiedHeartRateSeriesIDs(
+                points: points,
+                samples: samples as? [HKQuantitySample] ?? [],
+                deviceName: deviceName,
+                syncIdentifier: syncIdentifier,
+                store: store
+            ) { result in
+                completion(result.map { !$0.isEmpty })
+            }
         }
         store.execute(query)
+    }
+
+    private struct LegacyHeartRateKey: Hashable {
+        let millisecond: Int64
+        let bpm: Int
+
+        init(timestamp: Date, bpm: Double) {
+            millisecond = Int64((timestamp.timeIntervalSinceReferenceDate * 1_000).rounded())
+            self.bpm = Int(bpm.rounded())
+        }
+    }
+
+    static func normalizedHeartRatePoints(_ points: [(Date, Double)]) -> [(Date, Double)] {
+        // Keep the last reading for a timestamp, matching the series builder's
+        // single-quantity-per-time behavior. Preserve raw points for legacy deletion.
+        var byTimestamp: [Date: Double] = [:]
+        for (timestamp, bpm) in points where bpm.isFinite && bpm > 0 {
+            byTimestamp[timestamp] = bpm
+        }
+        return byTimestamp.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
+    }
+
+    struct HeartRateSeriesObservation {
+        let id: UUID
+        let syncIdentifier: String?
+        let points: [(Date, Double)]
+    }
+
+    enum HeartRateSeriesVerificationError: LocalizedError {
+        case incompleteSeries
+
+        var errorDescription: String? {
+            "A partial or ambiguous heart-rate series overlaps this recording; no legacy samples were deleted"
+        }
+    }
+
+    /// The builder may return several HKQuantitySamples for one recording. A replacement
+    /// is usable only when the combined quantities exactly equal the saved bag.
+    static func matchingHeartRateSeriesIDs(
+        points: [(Date, Double)],
+        observations: [HeartRateSeriesObservation],
+        syncIdentifier: String?
+    ) throws -> Set<UUID> {
+        let expected = Dictionary(
+            points.map { (LegacyHeartRateKey(timestamp: $0.0, bpm: $0.1), 1) },
+            uniquingKeysWith: +
+        )
+        func counts(_ series: [HeartRateSeriesObservation]) -> [LegacyHeartRateKey: Int] {
+            Dictionary(
+                series.flatMap(\.points).map { (LegacyHeartRateKey(timestamp: $0.0, bpm: $0.1), 1) },
+                uniquingKeysWith: +
+            )
+        }
+        let synced = observations.filter { syncIdentifier != nil && $0.syncIdentifier == syncIdentifier }
+        let legacy = observations.filter { $0.syncIdentifier == nil }
+        let syncedCounts = counts(synced)
+        let legacyCounts = counts(legacy)
+        let syncedMatches = !synced.isEmpty && syncedCounts == expected
+        let legacyMatches = !legacy.isEmpty && legacyCounts == expected
+
+        // A partial series may be a split recording whose other chunks are unreadable.
+        // Do not create another series or delete the individual samples in that state.
+        let partialLegacy = !legacyCounts.isEmpty && legacyCounts != expected
+            && legacyCounts.contains { expected[$0.key] != nil }
+        guard !partialLegacy, synced.isEmpty || syncedMatches, !(syncedMatches && legacyMatches) else {
+            throw HeartRateSeriesVerificationError.incompleteSeries
+        }
+        if syncedMatches { return Set(synced.map(\.id)) }
+        if legacyMatches { return Set(legacy.map(\.id)) }
+        return []
+    }
+
+    private static func verifiedHeartRateSeriesIDs(
+        points: [(Date, Double)],
+        samples: [HKQuantitySample],
+        deviceName: String?,
+        syncIdentifier: String?,
+        store: HKHealthStore,
+        completion: @escaping (Result<Set<UUID>, Error>) -> Void
+    ) {
+        guard let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate) else {
+            completion(.success([]))
+            return
+        }
+        guard let start = points.map(\.0).min(), let end = points.map(\.0).max() else {
+            completion(.success([]))
+            return
+        }
+        let candidates = samples.filter { sample in
+            knownHeartRateSourceBundleIDs.contains(sample.sourceRevision.source.bundleIdentifier)
+                && (deviceName == nil || sample.device?.name == deviceName)
+                && sample.startDate >= start.addingTimeInterval(-1)
+                && sample.endDate <= end.addingTimeInterval(1)
+                && (sample.count > 1 || (syncIdentifier != nil
+                    && sample.metadata?[HKMetadataKeySyncIdentifier] as? String == syncIdentifier))
+        }
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        var observations: [HeartRateSeriesObservation] = []
+
+        func inspect(_ index: Int) {
+            guard index < candidates.count else {
+                completion(Result {
+                    try matchingHeartRateSeriesIDs(
+                        points: points,
+                        observations: observations,
+                        syncIdentifier: syncIdentifier
+                    )
+                })
+                return
+            }
+            let sample = candidates[index]
+            let predicate = HKQuery.predicateForObject(with: sample.uuid)
+            var quantities: [(Date, Double)] = []
+            let query = HKQuantitySeriesSampleQuery(quantityType: hrType, predicate: predicate) {
+                _, quantity, interval, _, done, error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                if let quantity, let interval {
+                    quantities.append((interval.start, quantity.doubleValue(for: unit)))
+                }
+                guard done else { return }
+                guard quantities.count == sample.count else {
+                    completion(.failure(HeartRateSeriesVerificationError.incompleteSeries))
+                    return
+                }
+                observations.append(HeartRateSeriesObservation(
+                    id: sample.uuid,
+                    syncIdentifier: sample.metadata?[HKMetadataKeySyncIdentifier] as? String,
+                    points: quantities
+                ))
+                inspect(index + 1)
+            }
+            store.execute(query)
+        }
+        inspect(0)
+    }
+
+    struct LegacyHeartRateObservation {
+        let id: UUID
+        let timestamp: Date
+        let duration: TimeInterval
+        let bpm: Double
+        let count: Int
+        let metadataEmpty: Bool
+        let sourceBundleIdentifier: String
+    }
+
+    enum LegacyHeartRateMigrationError: LocalizedError {
+        case unknownSource
+        case duplicate
+        case differentApp
+
+        var errorDescription: String? {
+            switch self {
+            case .unknownSource:
+                return "Matching HR samples have an unknown source; no samples were deleted"
+            case .duplicate:
+                return "Ambiguous duplicate legacy HR samples; no samples were deleted"
+            case .differentApp:
+                return "Legacy HR samples belong to another app bundle ID and cannot be deleted here"
+            }
+        }
+    }
+
+    private static let knownHeartRateSourceBundleIDs: Set<String> = [
+        "com.artemz.fitness-exporter",
+        "com.artemz.fitness-exporter-my"
+    ]
+
+    static func legacyHeartRateSampleIDs(
+        points: [(Date, Double)],
+        observations: [LegacyHeartRateObservation],
+        currentBundleIdentifier: String?
+    ) throws -> Set<UUID> {
+        let expected = Dictionary(
+            points.map { (LegacyHeartRateKey(timestamp: $0.0, bpm: $0.1), 1) },
+            uniquingKeysWith: +
+        )
+        let matches = observations.filter { observation in
+            guard observation.count == 1,
+                  observation.metadataEmpty,
+                  abs(observation.duration) < 0.001,
+                  observation.bpm.isFinite,
+                  abs(observation.bpm - observation.bpm.rounded()) < 0.001 else {
+                return false
+            }
+            return expected[LegacyHeartRateKey(
+                timestamp: observation.timestamp,
+                bpm: observation.bpm
+            )] != nil
+        }
+        guard matches.allSatisfy({
+            knownHeartRateSourceBundleIDs.contains($0.sourceBundleIdentifier)
+        }) else {
+            throw LegacyHeartRateMigrationError.unknownSource
+        }
+        let foundCounts = Dictionary(
+            matches.map { (LegacyHeartRateKey(timestamp: $0.timestamp, bpm: $0.bpm), 1) },
+            uniquingKeysWith: +
+        )
+        guard foundCounts.allSatisfy({ $0.value <= (expected[$0.key] ?? 0) }) else {
+            throw LegacyHeartRateMigrationError.duplicate
+        }
+        guard matches.allSatisfy({ $0.sourceBundleIdentifier == currentBundleIdentifier }) else {
+            throw LegacyHeartRateMigrationError.differentApp
+        }
+        return Set(matches.map(\.id))
+    }
+
+    /// Previous releases saved one zero-duration HKQuantitySample per Polar HR point,
+    /// with empty metadata. Only samples matching the saved bag's exact points and
+    /// one of this project's historical bundle IDs can be migration candidates.
+    private static func migrateLegacyHeartRatesForSavedBag(
+        fileURL: URL,
+        profile: Profile,
+        completion: @escaping (ImportResult) -> Void
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let file: SavedFileSnapshot
+            let rawPoints: [(Date, Double)]
+            let points: [(Date, Double)]
+            do {
+                file = try readStableFile(fileURL: fileURL)
+                rawPoints = heartRatePoints(from: try decodeEventsFromBinary(file.data))
+                points = normalizedHeartRatePoints(rawPoints)
+            } catch {
+                completion(.failed("Can't prepare HR migration: \(error.localizedDescription)"))
+                return
+            }
+
+            func markComplete(_ result: ImportResult) {
+                do {
+                    try verifyFileUnchanged(fileURL: fileURL, expected: file.metadata)
+                    try SensorBagBackfillIndex.markHeartRateMigrationCompleted(
+                        key: backfillFileKey(fileURL: fileURL, profile: profile),
+                        fileSize: file.metadata.size,
+                        lastModifiedAt: file.metadata.mtime,
+                        in: documentsDirectory()
+                    )
+                    completion(result)
+                } catch {
+                    completion(.failed("Can't record HR migration: \(error.localizedDescription)"))
+                }
+            }
+
+            guard !rawPoints.isEmpty else {
+                markComplete(.noData)
+                return
+            }
+            guard !points.isEmpty else {
+                completion(.failed("No valid heart-rate points are available for a replacement series"))
+                return
+            }
+            guard let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate),
+                  let start = rawPoints.map(\.0).min(), let end = rawPoints.map(\.0).max() else {
+                completion(.failed("Heart rate type or sample timestamps are unavailable"))
+                return
+            }
+
+            let store = HKHealthStore()
+            DispatchQueue.main.async {
+                store.requestAuthorization(toShare: [hrType], read: [hrType]) { authorized, error in
+                    guard authorized, error == nil else {
+                        completion(.failed("Heart rate read/write authorization failed: "
+                            + (error?.localizedDescription ?? "not authorized")))
+                        return
+                    }
+
+                    func query(_ done: @escaping (Result<[HKQuantitySample], Error>) -> Void) {
+                        let predicate = HKQuery.predicateForSamples(
+                            withStart: start.addingTimeInterval(-0.01),
+                            end: end.addingTimeInterval(0.01),
+                            options: []
+                        )
+                        let query = HKSampleQuery(
+                            sampleType: hrType,
+                            predicate: predicate,
+                            limit: HKObjectQueryNoLimit,
+                            sortDescriptors: nil
+                        ) { _, samples, error in
+                            if let error {
+                                done(.failure(error))
+                            } else {
+                                done(.success(samples as? [HKQuantitySample] ?? []))
+                            }
+                        }
+                        store.execute(query)
+                    }
+
+                    let syncID = syncIdentifier(
+                        profile: profile,
+                        stream: "hr",
+                        fileHash: sha256Hex(file.data)
+                    )
+                    query { firstQuery in
+                        let samples: [HKQuantitySample]
+                        switch firstQuery {
+                        case .success(let found): samples = found
+                        case .failure(let error):
+                            completion(.failed("Can't read HR samples: \(error.localizedDescription)"))
+                            return
+                        }
+                        verifiedHeartRateSeriesIDs(
+                            points: points,
+                            samples: samples,
+                            deviceName: nil,
+                            syncIdentifier: syncID,
+                            store: store
+                        ) { seriesResult in
+                            let seriesIDs: Set<UUID>
+                            switch seriesResult {
+                            case .success(let ids) where !ids.isEmpty: seriesIDs = ids
+                            case .success:
+                                completion(.failed(
+                                    "No verified replacement HR series was found; check HealthKit read access"
+                                ))
+                                return
+                            case .failure(let error):
+                                completion(.failed("Can't verify replacement HR series: \(error.localizedDescription)"))
+                                return
+                            }
+
+                            let unit = HKUnit.count().unitDivided(by: .minute())
+                            let observations = samples.filter { !seriesIDs.contains($0.uuid) }.map { sample in
+                                LegacyHeartRateObservation(
+                                    id: sample.uuid,
+                                    timestamp: sample.startDate,
+                                    duration: sample.endDate.timeIntervalSince(sample.startDate),
+                                    bpm: sample.quantity.doubleValue(for: unit),
+                                    count: sample.count,
+                                    metadataEmpty: sample.metadata?.isEmpty ?? true,
+                                    sourceBundleIdentifier: sample.sourceRevision.source.bundleIdentifier
+                                )
+                            }
+                            let legacyIDs: Set<UUID>
+                            do {
+                                legacyIDs = try legacyHeartRateSampleIDs(
+                                    points: rawPoints,
+                                    observations: observations,
+                                    currentBundleIdentifier: Bundle.main.bundleIdentifier
+                                )
+                            } catch {
+                                completion(.failed(error.localizedDescription))
+                                return
+                            }
+                            let legacy = samples.filter { legacyIDs.contains($0.uuid) }
+                            guard !legacy.isEmpty else {
+                                markComplete(.alreadyPresent)
+                                return
+                            }
+                            store.delete(legacy.map { $0 as HKObject }) { deleted, error in
+                                guard deleted, error == nil else {
+                                    completion(.failed("Can't delete legacy HR samples: "
+                                        + (error?.localizedDescription ?? "unknown error")))
+                                    return
+                                }
+                                let deletedIDs = Set(legacy.map(\.uuid))
+                                query { secondQuery in
+                                    switch secondQuery {
+                                    case .failure(let error):
+                                        completion(.failed("Can't verify HR deletion: \(error.localizedDescription)"))
+                                    case .success(let remaining):
+                                        guard seriesIDs.isSubset(of: Set(remaining.map(\.uuid))),
+                                              remaining.allSatisfy({ !deletedIDs.contains($0.uuid) }) else {
+                                            completion(.failed("Legacy HR samples remained after deletion"))
+                                            return
+                                        }
+                                        markComplete(.imported)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private static func hasLegacyHeartbeatSeries(
